@@ -1,30 +1,23 @@
-# JTAG Universal Test Station
+# BSDL JTAG Chip Tester
 
-Sistema web local para Raspberry Pi.
+Sistema simple para Raspberry Pi:
+- Sube BSDL
+- Analiza IDCODE, IR, Boundary Register y pines
+- Ejecuta OpenOCD
+- Revisa IDCODE + SAMPLE
+- Opcional: EXTEST para posibles cortos
 
-## Qué hace
-
-- Sube BSDL.
-- Extrae entity, IDCODE, IR length, opcodes, Boundary Register y pines.
-- Genera plan automático de pruebas por pin.
-- Ejecuta OpenOCD automáticamente con configuración creada desde el BSDL.
-- Prueba no invasiva: scan_chain, IDCODE y SAMPLE.
-- Prueba opcional EXTEST para buscar posibles cortos manejando pines.
-- Prueba funcional con firmware: carga firmware y espera mensaje TCP desde la placa.
-
-## Arranque en Raspberry Pi
+## Uso
 
 Terminal 1:
 
 ```bash
-cd ~/jtagUniversal
 ./start_backend.sh
 ```
 
 Terminal 2:
 
 ```bash
-cd ~/jtagUniversal
 ./start_frontend.sh
 ```
 
@@ -36,5 +29,5 @@ http://IP_DE_LA_PI:5173
 
 ## Importante
 
-Con solo BSDL el sistema puede revisar JTAG, IDCODE, Boundary Scan, pines y posibles cortos.
-Para saber qué pines deben estar conectados en la placa, hace falta Netlist.
+Con solo BSDL se revisa el chip y los pines Boundary Scan.
+Para saber conexiones exactas de la placa se necesita Netlist.
