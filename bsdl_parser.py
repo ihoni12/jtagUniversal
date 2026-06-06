@@ -25,18 +25,27 @@ class BsdlInfo:
 
 
 def _clean(text: str) -> str:
-    text = re.sub(r"--.*", "", text)
-    return text
+    return re.sub(r"--.*", "", text)
 
 
 def _collect_attribute(text: str, name: str) -> str:
-    # BSDL attributes are often split in quoted strings joined by &.
     m = re.search(rf"attribute\s+{re.escape(name)}\s+of\s+\w+\s*:\s*entity\s+is\s*(.*?);", text, re.I | re.S)
     if not m:
         return ""
     raw = m.group(1)
     pieces = re.findall(r'"(.*?)"', raw, re.S)
     return "".join(pieces) if pieces else raw.strip().strip('"')
+
+
+def _to_int(v):
+    try:
+        return int(str(v).strip())
+    except Exception:
+        return None
+
+
+def normalize_instruction_name(name: str) -> str:
+    return name.strip().upper().replace("-", "_")
 
 
 def parse_bsdl(text: str) -> BsdlInfo:
@@ -54,15 +63,19 @@ def parse_bsdl(text: str) -> BsdlInfo:
 
     inst_raw = _collect_attribute(text, "INSTRUCTION_OPCODE")
     instructions: Dict[str, str] = {}
-    for name, code in re.findall(r"(\w+)\s*\(([^)]*)\)", inst_raw):
-        instructions[name.upper()] = re.sub(r"[^01]", "", code)
+    # Accept names like SAMPLE/PRELOAD, SAMPLE_PRELOAD, AVR_RESET.
+    for name, code in re.findall(r"([A-Za-z0-9_./-]+)\s*\(([^)]*)\)", inst_raw):
+        clean_code = re.sub(r"[^01]", "", code)
+        if clean_code:
+            instructions[normalize_instruction_name(name)] = clean_code
+            if normalize_instruction_name(name) == "SAMPLE/PRELOAD":
+                instructions.setdefault("SAMPLE", clean_code)
+                instructions.setdefault("SAMPLE_PRELOAD", clean_code)
 
-    # PORT declarations: port (A : in bit; B : inout bit_vector(...));
     pins = set()
     pm = re.search(r"port\s*\((.*?)\)\s*;", text, re.I | re.S)
     if pm:
-        port_body = pm.group(1)
-        for decl in re.split(r";", port_body):
+        for decl in re.split(r";", pm.group(1)):
             decl = decl.strip()
             if not decl or ":" not in decl:
                 continue
@@ -74,45 +87,51 @@ def parse_bsdl(text: str) -> BsdlInfo:
 
     braw = _collect_attribute(text, "BOUNDARY_REGISTER")
     boundary: List[BoundaryCell] = []
-    # Handles entries like: 0 (BC_1, PINA0, input, X),
     for idx, inside in re.findall(r"(\d+)\s*\((.*?)\)", braw, re.S):
         parts = [p.strip() for p in inside.split(",")]
         while len(parts) < 4:
             parts.append("")
-        def to_int(v):
-            try:
-                return int(v)
-            except Exception:
-                return None
-        boundary.append(BoundaryCell(
+        cell = BoundaryCell(
             index=int(idx),
             cell_type=parts[0],
             port=parts[1],
             function=parts[2].lower(),
             safe=parts[3],
-            ccell=to_int(parts[4]) if len(parts) > 4 else None,
-            disval=parts[5] if len(parts) > 5 else None,
-            rslt=parts[6] if len(parts) > 6 else None,
-        ))
-        if parts[1] and parts[1] not in {"*", "internal", "control", "CONTROL"}:
-            pins.add(parts[1])
+            ccell=_to_int(parts[4]) if len(parts) > 4 else None,
+            disval=parts[5].strip() if len(parts) > 5 else None,
+            rslt=parts[6].strip() if len(parts) > 6 else None,
+        )
+        boundary.append(cell)
+        if cell.port and cell.port not in {"*", "internal", "control", "CONTROL"}:
+            pins.add(cell.port)
 
     boundary.sort(key=lambda c: c.index)
     return BsdlInfo(entity, instruction_length, boundary_length, idcode, instructions, sorted(pins), boundary)
 
 
 def pin_cells(info: BsdlInfo):
+    by_index = {c.index: c for c in info.boundary}
     d = {}
     for c in info.boundary:
         if not c.port or c.port in {"*", "internal", "control", "CONTROL"}:
             continue
         p = d.setdefault(c.port, {"input": [], "output": [], "control": [], "other": []})
-        if "input" in c.function or "observe" in c.function:
+        fn = c.function.lower()
+        if "input" in fn or "observe" in fn:
             p["input"].append(c)
-        elif "output" in c.function:
+        elif "output" in fn:
             p["output"].append(c)
-        elif "control" in c.function or "enable" in c.function:
+            if c.ccell is not None and c.ccell in by_index:
+                p["control"].append(by_index[c.ccell])
+        elif "control" in fn or "enable" in fn:
             p["control"].append(c)
         else:
             p["other"].append(c)
+    # remove duplicate controls
+    for p in d.values():
+        seen = set(); uniq = []
+        for c in p["control"]:
+            if c.index not in seen:
+                uniq.append(c); seen.add(c.index)
+        p["control"] = uniq
     return d
