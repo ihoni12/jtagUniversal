@@ -1,40 +1,71 @@
-# BSDL Test Station
+# JTAG Web Station
 
-Cliente web + backend para subir archivos BSDL y ver la información separada.
+Interfaz web para subir un archivo BSDL desde tu computadora y ejecutar una revision JTAG Boundary Scan en la Raspberry Pi.
 
-## Raspberry Pi
+## Estructura
 
-Terminal 1:
-```bash
-cd bsdl-test-station
-./start_backend.sh
+```text
+backend/   Servidor Flask + script JTAG
+frontend/  Web React/Vite
 ```
 
-Terminal 2:
+## 1. Instalar backend en la Raspberry
+
 ```bash
-cd bsdl-test-station
-./start_frontend.sh
+cd backend
+python3 -m venv venv
+source venv/bin/activate
+pip install -r requirements.txt
+sudo python3 app.py
 ```
 
-Abre desde tu computadora:
+El backend queda en:
+
+```text
+http://IP_DE_TU_RASPBERRY:5000
+```
+
+Nota: si `sudo python3 app.py` no usa el venv, puedes instalar Flask globalmente o ejecutar sin venv si ya tienes dependencias instaladas.
+
+## 2. Instalar frontend en la Raspberry
+
+En otra terminal:
+
+```bash
+cd frontend
+npm install
+npm run dev -- --host 0.0.0.0
+```
+
+La web queda en:
+
 ```text
 http://IP_DE_TU_RASPBERRY:5173
 ```
 
-El backend queda en:
+Desde tu computadora entra a esa direccion.
+
+## 3. Uso
+
+1. Abre la web.
+2. Sube el archivo `.bsdl` desde tu computadora.
+3. Aprieta **Iniciar revision**.
+4. Mira el progreso en vivo.
+
+## Pines JTAG fijos en la Raspberry
+
+El script usa:
+
 ```text
-http://IP_DE_TU_RASPBERRY:8000
+TCK = GPIO11
+TMS = GPIO25
+TDI = GPIO10
+TDO = GPIO9
+Velocidad = 10 kHz
 ```
 
-## Qué muestra
-- Entity / chip
-- Instruction length
-- IDCODE
-- Boundary length
-- Puertos
-- PIN_MAP
-- Instrucciones JTAG y opcode
-- Boundary register completo
-- JSON completo
+Si cambias el cableado, modifica estos valores en:
 
-Esto solo analiza el archivo BSDL. Para revisar cortos o pines reales hace falta ejecutar JTAG real con OpenOCD u otra herramienta.
+```text
+backend/mega_jtag_bsdl_test.py
+```
