@@ -1,306 +1,247 @@
-#!/usr/bin/env python3
-import os, re, socket, time, html
+import re
+from pathlib import Path
 from flask import Flask, request, render_template_string
 
 app = Flask(__name__)
-UPLOAD_DIR = 'uploads'
-os.makedirs(UPLOAD_DIR, exist_ok=True)
 
-DEFAULT_TAP = 'atmega2560.cpu'
-DEFAULT_HOST = '127.0.0.1'
-DEFAULT_PORT = 4444
-EXPECTED_IDCODE = '0x4980103f'
-
-HTML_PAGE = r'''
+HTML = r'''
 <!doctype html>
 <html lang="es">
 <head>
-<meta charset="utf-8">
-<title>JTAG ATmega2560 Tester</title>
-<style>
-body{font-family:Arial,sans-serif;background:#0f172a;color:#e5e7eb;margin:0;padding:22px}
-.card{background:#111827;border:1px solid #334155;border-radius:14px;padding:18px;margin-bottom:18px;box-shadow:0 6px 20px rgba(0,0,0,.25)}
-h1{margin:0 0 16px}.row{display:flex;gap:12px;flex-wrap:wrap;align-items:end}label{display:block;font-size:13px;color:#cbd5e1;margin-bottom:5px}
-input,button{border-radius:10px;border:1px solid #475569;background:#020617;color:#fff;padding:10px}button{cursor:pointer;background:#2563eb;border:0;font-weight:bold}.btn2{background:#475569}.msg{white-space:pre-wrap;background:#020617;border-radius:10px;padding:12px;max-height:380px;overflow:auto;font-family:Consolas,monospace;font-size:13px}
-.grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(92px,1fr));gap:8px;margin-top:14px}.pin{border-radius:10px;padding:9px;text-align:center;font-size:13px;border:1px solid #334155}.wait{background:#334155}.pass{background:#166534}.fail{background:#991b1b}.skip{background:#854d0e}.pin small{display:block;color:#e2e8f0;font-size:11px;margin-top:4px}.legend span{display:inline-block;padding:6px 10px;border-radius:9px;margin-right:7px}.green{background:#166534}.red{background:#991b1b}.gray{background:#334155}.orange{background:#854d0e}
-</style>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Lector BSDL</title>
+  <style>
+    body{font-family:Arial, sans-serif;background:#f3f6fb;margin:0;color:#1f2937}
+    header{background:#16243a;color:white;padding:18px 24px}
+    main{max-width:1200px;margin:20px auto;padding:0 14px}
+    .card{background:white;border-radius:14px;padding:18px;margin:14px 0;box-shadow:0 2px 12px #0001}
+    h1{margin:0;font-size:26px} h2{margin-top:0;color:#16243a}
+    input[type=file]{padding:10px;background:#eef2f7;border-radius:8px;width:100%}
+    button{background:#2563eb;color:white;border:0;padding:11px 18px;border-radius:9px;font-size:16px;margin-top:12px;cursor:pointer}
+    .grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:10px}
+    .info{background:#f8fafc;border:1px solid #e5e7eb;border-radius:10px;padding:10px}
+    .label{font-size:13px;color:#64748b}.value{font-weight:bold;margin-top:4px;word-break:break-word}
+    table{width:100%;border-collapse:collapse;font-size:14px} th,td{border-bottom:1px solid #e5e7eb;padding:8px;text-align:left;vertical-align:top}
+    th{background:#eef2f7;position:sticky;top:0}.ok{color:#15803d;font-weight:bold}.warn{color:#b45309;font-weight:bold}.bad{color:#b91c1c;font-weight:bold}
+    .pill{display:inline-block;background:#e0f2fe;border-radius:999px;padding:4px 8px;margin:2px;font-size:13px}.muted{color:#64748b}.small{font-size:13px}
+  </style>
 </head>
 <body>
-<h1>Revisión JTAG ATmega2560</h1>
-<div class="card">
-<form method="post" enctype="multipart/form-data">
-<div class="row">
-<div><label>BSDL</label><input type="file" name="bsdl" accept=".bsdl,.bsd,.txt" required></div>
-<div><label>TAP OpenOCD</label><input name="tap" value="{{tap}}"></div>
-<div><label>Host</label><input name="host" value="127.0.0.1"></div>
-<div><label>Puerto</label><input name="port" value="4444"></div>
-<div><label>Delay entre pines</label><input name="delay" value="0.02"></div>
-<div><button type="submit">Empezar revisión</button></div>
-</div>
-</form>
-</div>
-{% if summary %}
-<div class="card">
-<h2>Resultado</h2>
-<div class="legend"><span class="green">Verde = pasó</span><span class="red">Rojo = posible corto/fallo</span><span class="orange">Naranja = no probado</span><span class="gray">Gris = pendiente</span></div>
-<p>{{summary}}</p>
-<div class="grid">
-{% for p in pins %}<div class="pin {{p.status}}"><b>{{p.name}}</b><small>{{p.note}}</small></div>{% endfor %}
-</div>
-</div>
-<div class="card"><h2>Log</h2><div class="msg">{{log}}</div></div>
-{% endif %}
-</body>
-</html>
+<header><h1>Lector de información BSDL</h1><div class="small">Solo analiza el archivo BSDL. No ejecuta JTAG todavía.</div></header>
+<main>
+  <div class="card">
+    <form method="post" enctype="multipart/form-data">
+      <label>Sube archivo .bsdl</label><br><br>
+      <input type="file" name="bsdl" accept=".bsdl,.bsd,.txt" required>
+      <button type="submit">Leer BSDL</button>
+    </form>
+  </div>
+
+  {% if result %}
+  <div class="card">
+    <h2>1. Información general</h2>
+    <div class="grid">
+      {% for k,v in result.general.items() %}
+      <div class="info"><div class="label">{{k}}</div><div class="value">{{v}}</div></div>
+      {% endfor %}
+    </div>
+  </div>
+
+  <div class="card">
+    <h2>2. Instrucciones JTAG</h2>
+    {% if result.instructions %}
+    <table><thead><tr><th>Nombre</th><th>Opcode binario</th><th>Opcode hex</th></tr></thead><tbody>
+    {% for ins in result.instructions %}
+      <tr><td>{{ins.name}}</td><td>{{ins.binary}}</td><td>{{ins.hex}}</td></tr>
+    {% endfor %}
+    </tbody></table>
+    {% else %}<p class="warn">No se encontraron instrucciones.</p>{% endif %}
+  </div>
+
+  <div class="card">
+    <h2>3. Pines y celdas Boundary Scan</h2>
+    <p class="muted">Separado por pin. Cada pin puede tener celda Data, Control, Input/Output, etc.</p>
+    {% if result.pins %}
+    <table><thead><tr><th>Pin / Señal</th><th>Celdas</th><th>Data bits</th><th>Control bits</th><th>Tipos encontrados</th></tr></thead><tbody>
+    {% for pin in result.pins %}
+      <tr>
+        <td><b>{{pin.name}}</b></td>
+        <td>
+          {% for c in pin.cells %}
+            <span class="pill">bit {{c.bit}}: {{c.cell_type}}</span>
+          {% endfor %}
+        </td>
+        <td>{{pin.data_bits|join(', ')}}</td>
+        <td>{{pin.control_bits|join(', ')}}</td>
+        <td>{{pin.types|join(', ')}}</td>
+      </tr>
+    {% endfor %}
+    </tbody></table>
+    {% else %}<p class="warn">No se encontraron pines/celdas.</p>{% endif %}
+  </div>
+
+  <div class="card">
+    <h2>4. Registro boundary completo</h2>
+    {% if result.boundary_cells %}
+    <table><thead><tr><th>Bit</th><th>Celda</th><th>Puerto/Pin</th><th>Tipo</th><th>Control</th><th>Texto original</th></tr></thead><tbody>
+    {% for c in result.boundary_cells %}
+      <tr><td>{{c.bit}}</td><td>{{c.cell}}</td><td>{{c.port}}</td><td>{{c.cell_type}}</td><td>{{c.control}}</td><td class="small">{{c.raw}}</td></tr>
+    {% endfor %}
+    </tbody></table>
+    {% else %}<p class="warn">No se encontraron celdas boundary.</p>{% endif %}
+  </div>
+
+  <div class="card">
+    <h2>5. Avisos</h2>
+    {% if result.warnings %}
+      {% for w in result.warnings %}<p class="warn">⚠ {{w}}</p>{% endfor %}
+    {% else %}<p class="ok">No hay avisos importantes.</p>{% endif %}
+  </div>
+  {% endif %}
+</main>
+</body></html>
 '''
 
-class OpenOCD:
-    def __init__(self, host, port):
-        self.host=host; self.port=int(port)
-    def cmd(self, command, timeout=3.0):
-        with socket.create_connection((self.host,self.port), timeout=timeout) as s:
-            s.settimeout(timeout)
-            try: s.recv(4096)  # prompt/banner
-            except Exception: pass
-            s.sendall((command+'\n').encode())
-            time.sleep(0.05)
-            chunks=[]
-            end=time.time()+timeout
-            while time.time()<end:
-                try:
-                    data=s.recv(8192)
-                    if not data: break
-                    chunks.append(data.decode(errors='ignore'))
-                    if '> ' in chunks[-1] or command in ''.join(chunks):
-                        break
-                except socket.timeout:
-                    break
-            return ''.join(chunks)
+class Obj(dict):
+    __getattr__ = dict.get
 
-def parse_bsdl(text):
-    ent = re.search(r'entity\s+(\w+)\s+is', text, re.I)
-    entity = ent.group(1) if ent else 'UNKNOWN'
+def strip_comments(text):
+    return re.sub(r'--.*', '', text)
 
-    ilen = None
-    m = re.search(r'INSTRUCTION_LENGTH\s+of\s+\w+\s*:\s*entity\s+is\s+(\d+)', text, re.I)
-    if m:
-        ilen = int(m.group(1))
+def find_entity(text):
+    m = re.search(r'\bentity\s+(\w+)\s+is\b', text, re.I)
+    return m.group(1) if m else 'No encontrado'
 
-    blen = None
-    m = re.search(r'BOUNDARY_LENGTH\s+of\s+\w+\s*:\s*entity\s+is\s+(\d+)', text, re.I)
-    if m:
-        blen = int(m.group(1))
+def attr_value(text, attr):
+    m = re.search(r'attribute\s+'+re.escape(attr)+r'\s+of\s+[^:]+:\s*[^\s]+\s+is\s*(.*?);', text, re.I|re.S)
+    return m.group(1).strip() if m else ''
 
-    # Opcodes: EXTEST (0000), SAMPLE/PRELOAD (0010), etc.
-    ops = {}
-    opcode_block = re.search(r'INSTRUCTION_OPCODE.*?is(.*?);', text, re.I | re.S)
-    if opcode_block:
-        for name, bits in re.findall(r'([A-Z0-9_\/]+)\s*\(\s*([01]+)\s*\)', opcode_block.group(1), re.I):
-            ops[name.upper()] = bits
+def collect_quoted(attr_text):
+    return ''.join(re.findall(r'"(.*?)"', attr_text, re.S))
 
-    # Parse real BSDL boundary lines, including output3 control reference:
-    # 164 (BC_1, PG5, output3, X, 163, 0, Z)
-    # 163 (BC_1, *, control, 1)
+def parse_instruction_len(text):
+    val = collect_quoted(attr_value(text, 'INSTRUCTION_LENGTH')) or attr_value(text, 'INSTRUCTION_LENGTH')
+    m = re.search(r'\d+', val)
+    return int(m.group(0)) if m else None
+
+def parse_boundary_len(text):
+    val = collect_quoted(attr_value(text, 'BOUNDARY_LENGTH')) or attr_value(text, 'BOUNDARY_LENGTH')
+    m = re.search(r'\d+', val)
+    return int(m.group(0)) if m else None
+
+def parse_opcodes(text):
+    data = collect_quoted(attr_value(text, 'INSTRUCTION_OPCODE'))
+    out = []
+    for name, bits in re.findall(r'([A-Za-z0-9_/]+)\s*\(\s*([01Xx]+)\s*\)', data):
+        b = bits.upper()
+        hx = '-'
+        if set(b) <= {'0','1'}:
+            hx = '0x%X' % int(b, 2)
+        out.append(Obj(name=name, binary=b, hex=hx))
+    return out
+
+def split_boundary_entries(s):
+    entries = []
+    current = ''
+    depth = 0
+    for ch in s:
+        current += ch
+        if ch == '(':
+            depth += 1
+        elif ch == ')':
+            depth -= 1
+            if depth == 0:
+                entries.append(current.strip(' ,&\n\t'))
+                current = ''
+    return entries
+
+def parse_boundary(text):
+    data = collect_quoted(attr_value(text, 'BOUNDARY_REGISTER'))
     cells = []
-    bit_to_control_owner = {}  # control_bit -> pin name, learned from output3/bidir line
-
-    for raw in text.splitlines():
-        line = raw.strip().strip('"').rstrip('&').rstrip(',').strip()
-        m = re.match(r'^(\d+)\s*\((.*)\)\s*$', line)
+    for entry in split_boundary_entries(data):
+        m = re.match(r'\s*(\d+)\s*\((.*)\)\s*', entry, re.S)
         if not m:
             continue
         bit = int(m.group(1))
-        parts = [x.strip() for x in m.group(2).split(',')]
-        if len(parts) < 3:
-            continue
-        cell = parts[0]
-        port = parts[1].upper()
-        typ = parts[2].lower()
-        control_ref = None
-        if typ in ('output3', 'bidir', 'output2') and len(parts) >= 5:
-            try:
-                control_ref = int(parts[4])
-            except Exception:
-                control_ref = None
-        cells.append({'bit': bit, 'cell': cell, 'port': port, 'type': typ, 'control_ref': control_ref, 'raw': line})
-        if port not in ('*', 'INTERNAL') and control_ref is not None:
-            bit_to_control_owner[control_ref] = port
+        parts = [p.strip() for p in m.group(2).split(',')]
+        cell = parts[0] if len(parts)>0 else ''
+        port = parts[1] if len(parts)>1 else ''
+        cell_type = parts[2] if len(parts)>2 else ''
+        control = parts[4] if len(parts)>4 else ''
+        cells.append(Obj(bit=bit, cell=cell, port=port, cell_type=cell_type, control=control, raw=f'{bit} ({m.group(2)})'))
+    cells.sort(key=lambda x: x.bit, reverse=True)
+    return cells
 
-    # Fallback for table-style text: 164 PG5.Data / 163 PG5.Control
-    if not cells:
-        for bit, sig in re.findall(r'(\d+)\s+([A-Z]{1,2}\d\.(?:Data|Control)|RSTT)', text, re.I):
-            bit = int(bit)
-            sig = sig.upper()
-            if sig.endswith('.DATA'):
-                port = sig.split('.')[0]
-                typ = 'output3'
-                control_ref = None
-            elif sig.endswith('.CONTROL'):
-                port = sig.split('.')[0]
-                typ = 'control'
-                control_ref = None
-            else:
-                port = sig
-                typ = 'observe_only'
-                control_ref = None
-            cells.append({'bit': bit, 'cell': 'BC_1', 'port': port, 'type': typ, 'control_ref': control_ref, 'raw': sig})
+def pin_base(port):
+    if not port or port == '*':
+        return None
+    # PG5.Data -> PG5, PG5 -> PG5
+    return port.split('.')[0].strip()
 
+def group_pins(cells):
     pins = {}
     for c in cells:
-        p = c['port'].upper()
-
-        # In valid BSDL control cells often have port='*'. Attach them to the pin that referenced this control bit.
-        if p == '*' and 'control' in c['type']:
-            p = bit_to_control_owner.get(c['bit'], '*')
-
-        if p in ('*', 'INTERNAL'):
+        base = pin_base(c.port)
+        # If control cell has port *, attach by its bit only impossible. Keep separate internal cell.
+        if not base:
             continue
-
-        pins.setdefault(p, {'name': p, 'data_bits': [], 'control_bits': [], 'observe_bits': []})
-
-        if 'control' in c['type']:
-            pins[p]['control_bits'].append(c['bit'])
-        elif c['type'] in ('input', 'observe_only') or p == 'RSTT':
-            pins[p]['observe_bits'].append(c['bit'])
-        else:
-            # output3/bidir/data cells are both drive data and readable during scan.
-            pins[p]['data_bits'].append(c['bit'])
-            if c.get('control_ref') is not None:
-                if c['control_ref'] not in pins[p]['control_bits']:
-                    pins[p]['control_bits'].append(c['control_ref'])
-
-    # Clean invalid/duplicate bits and sort high-to-low for human readability.
+        p = pins.setdefault(base, {'name': base, 'cells': [], 'data_bits': [], 'control_bits': [], 'types': set()})
+        p['cells'].append(c)
+        typ = (c.cell_type or '').lower()
+        p['types'].add(c.cell_type or '-')
+        rawport = (c.port or '').lower()
+        if 'data' in rawport or 'output' in typ or 'bidir' in typ or 'input' in typ:
+            p['data_bits'].append(str(c.bit))
+        if 'control' in rawport or 'control' in typ:
+            p['control_bits'].append(str(c.bit))
+    out=[]
     for p in pins.values():
-        p['data_bits'] = sorted(set(p['data_bits']), reverse=True)
-        p['control_bits'] = sorted(set(p['control_bits']), reverse=True)
-        p['observe_bits'] = sorted(set(p['observe_bits']), reverse=True)
+        p['cells'].sort(key=lambda x: x.bit, reverse=True)
+        p['types'] = sorted(p['types'])
+        out.append(Obj(**p))
+    out.sort(key=lambda x: x.name)
+    return out
 
-    return entity, ilen, blen, ops, pins
-
-def bitstring_to_list(hexstr, blen):
-    val=int(hexstr,16)
-    # list index = bit number
-    return [(val>>i)&1 for i in range(blen)]
-
-def list_to_hex(bits):
-    val=0
-    for i,b in enumerate(bits):
-        if b: val |= (1<<i)
-    nibbles=(len(bits)+3)//4
-    return format(val, '0{}x'.format(nibbles))
-
-def extract_hex(resp):
-    # prefer long hex from drscan result
-    vals=re.findall(r'\b(?:0x)?[0-9a-fA-F]{8,}\b', resp)
-    if not vals: return None
-    return vals[-1].lower().replace('0x','')
-
-def run_review(bsdl_text, tap, host, port, delay):
-    log=[]
-    entity, ilen, blen, ops, pins = parse_bsdl(bsdl_text)
-    log.append('Empezó la revisión')
-    log.append(f'Chip/Entity: {entity}')
-    log.append(f'Instruction length: {ilen}')
-    log.append(f'Boundary length: {blen}')
-    log.append('Instrucciones encontradas: ' + ', '.join(sorted(ops.keys())))
-    if not ilen or not blen:
-        raise RuntimeError('El BSDL no tiene INSTRUCTION_LENGTH o BOUNDARY_LENGTH')
-    sample = ops.get('SAMPLE') or ops.get('SAMPLE/PRELOAD') or ops.get('SAMPLE_PRELOAD')
-    extest = ops.get('EXTEST')
-    idcode = ops.get('IDCODE')
-    if not sample: raise RuntimeError('El BSDL no contiene SAMPLE o SAMPLE/PRELOAD')
-    if not extest: raise RuntimeError('El BSDL no contiene EXTEST')
-    if not idcode: raise RuntimeError('El BSDL no contiene IDCODE')
-    oo=OpenOCD(host, port)
-    log.append('Verificando conexión real JTAG con IDCODE...')
-    r=oo.cmd(f'irscan {tap} 0x{int(idcode,2):x}')
-    r=oo.cmd(f'drscan {tap} 32 0')
-    hx=extract_hex(r)
-    if not hx or int(hx,16)==0:
-        raise RuntimeError(f'JTAG no responde bien. IDCODE leído: 0x00000000. Revisa cables/alimentación/fuse.')
-    log.append(f'IDCODE OK: 0x{int(hx,16):08x}')
-    # baseline sample
-    oo.cmd(f'irscan {tap} 0x{int(sample,2):x}')
-    base_resp=oo.cmd(f'drscan {tap} {blen} 0')
-    base_hex=extract_hex(base_resp) or '0'
-    base=bitstring_to_list(base_hex, blen)
-    log.append('SAMPLE leído correctamente')
-    # EXTEST preload vector all safe: controls=1 (Z/input), data=0
-    all_bits=[0]*blen
-    for p in pins.values():
-        for cb in p['control_bits']:
-            if cb < blen: all_bits[cb]=1
-    oo.cmd(f'irscan {tap} 0x{int(extest,2):x}')
-    pin_results=[]; tested=0; failcount=0
-    log.append('Ejecutando EXTEST: cada pin sale 0 y luego 1; se lee si otros pines cambian igual.')
-    for name in sorted(pins.keys()):
-        p=pins[name]
-        if name == 'RSTT' or not p['data_bits']:
-            pin_results.append({'name':name,'status':'skip','note':'sin data'})
-            continue
-        data_bit=p['data_bits'][0]
-        control_bits=p['control_bits']
-        if data_bit >= blen:
-            pin_results.append({'name':name,'status':'skip','note':'bit inválido'})
-            continue
-        # drive enable: control=0 often enables output on AVR BSDL style. If wrong, still safe-ish but use only JTAG boundary.
-        v0=all_bits[:]
-        for cb in control_bits:
-            if cb < blen: v0[cb]=0
-        v0[data_bit]=0
-        v1=v0[:]; v1[data_bit]=1
-        log.append(f'Probando {name}: bit data {data_bit}, control {control_bits}')
-        oo.cmd(f'drscan {tap} {blen} 0x{list_to_hex(v0)}')
-        time.sleep(delay)
-        r0=oo.cmd(f'drscan {tap} {blen} 0x{list_to_hex(v0)}')
-        h0=extract_hex(r0) or '0'
-        oo.cmd(f'drscan {tap} {blen} 0x{list_to_hex(v1)}')
-        time.sleep(delay)
-        r1=oo.cmd(f'drscan {tap} {blen} 0x{list_to_hex(v1)}')
-        h1=extract_hex(r1) or '0'
-        b0=bitstring_to_list(h0, blen); b1=bitstring_to_list(h1, blen)
-        changed=[]
-        for other,on in pins.items():
-            if other==name or other=='RSTT': continue
-            for ob in (on['data_bits']+on['observe_bits']):
-                if ob < blen and b0[ob] != b1[ob]:
-                    changed.append(other); break
-        tested += 1
-        if changed:
-            failcount += 1
-            note='cambia: '+','.join(changed[:3]) + ('...' if len(changed)>3 else '')
-            pin_results.append({'name':name,'status':'fail','note':note})
-            log.append(f'  FALLA/SOSPECHA: {name} cambia junto con {changed}')
-        else:
-            pin_results.append({'name':name,'status':'pass','note':'OK'})
-            log.append(f'  OK: {name}')
-    # return to SAMPLE/BYPASS to reduce driving
-    try: oo.cmd(f'irscan {tap} 0x{int(sample,2):x}')
-    except Exception: pass
-    log.append(f'Pines manejables probados: {tested}')
-    log.append(f'Pines con posible fallo/corto: {failcount}')
-    log.append('Terminó la revisión')
-    summary=f'Probados {tested} pines. Fallos/sospechas: {failcount}. Verde=pasó, rojo=posible corto/fallo, naranja=no probado.'
-    return summary, pin_results, '\n'.join(log)
+def parse_bsdl(text, filename):
+    clean = strip_comments(text)
+    entity = find_entity(clean)
+    instr_len = parse_instruction_len(clean)
+    bound_len = parse_boundary_len(clean)
+    instructions = parse_opcodes(clean)
+    cells = parse_boundary(clean)
+    pins = group_pins(cells)
+    warnings=[]
+    if not instructions: warnings.append('No encontré INSTRUCTION_OPCODE.')
+    if bound_len is None: warnings.append('No encontré BOUNDARY_LENGTH.')
+    if not cells: warnings.append('No encontré BOUNDARY_REGISTER o no pude leer sus celdas.')
+    if bound_len is not None and cells and len(cells) != bound_len:
+        warnings.append(f'BOUNDARY_LENGTH dice {bound_len}, pero leí {len(cells)} celdas.')
+    return Obj(
+        general=Obj({
+            'Archivo': filename,
+            'Entity / Chip': entity,
+            'Instruction length': instr_len if instr_len is not None else 'No encontrado',
+            'Boundary length': bound_len if bound_len is not None else 'No encontrado',
+            'Cantidad de instrucciones': len(instructions),
+            'Cantidad de celdas boundary': len(cells),
+            'Cantidad de pines/señales': len(pins),
+        }),
+        instructions=instructions,
+        boundary_cells=cells,
+        pins=pins,
+        warnings=warnings
+    )
 
 @app.route('/', methods=['GET','POST'])
 def index():
-    summary=None; pins=[]; log=''
-    tap=DEFAULT_TAP
-    if request.method=='POST':
-        try:
-            tap=request.form.get('tap',DEFAULT_TAP).strip() or DEFAULT_TAP
-            host=request.form.get('host',DEFAULT_HOST).strip() or DEFAULT_HOST
-            port=int(request.form.get('port',DEFAULT_PORT))
-            delay=float(request.form.get('delay','0.02'))
-            f=request.files['bsdl']
-            text=f.read().decode(errors='ignore')
-            summary,pins,log=run_review(text,tap,host,port,delay)
-        except Exception as e:
-            summary='ERROR'
-            pins=[]
-            log='ERROR: '+str(e)
-    return render_template_string(HTML_PAGE, summary=summary, pins=pins, log=log, tap=tap)
+    result = None
+    if request.method == 'POST':
+        f = request.files.get('bsdl')
+        if f:
+            text = f.read().decode('utf-8', errors='ignore')
+            result = parse_bsdl(text, f.filename)
+    return render_template_string(HTML, result=result)
 
-if __name__=='__main__':
+if __name__ == '__main__':
     app.run(host='0.0.0.0', port=8088, debug=False)

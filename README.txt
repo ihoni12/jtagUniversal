@@ -1,24 +1,20 @@
-JTAG ATmega2560 pin color tester
+Lector BSDL - paso 1
 
-1) Terminal 1:
-   cd ~/jtagUniversal
-   sudo openocd -f ./pi-atmega2560.cfg
+Este programa solo lee un archivo BSDL y muestra la informacion separada:
+1. Informacion general
+2. Instrucciones JTAG
+3. Pines y sus celdas
+4. Registro boundary completo
+5. Avisos
 
-2) Terminal 2:
-   cd ~/jtagUniversal
-   source venv/bin/activate
-   pip install flask
-   python3 app.py
+Instalacion en Raspberry Pi:
 
-3) Abrir:
-   http://IP_DE_TU_PI:8088
+python3 -m venv venv
+source venv/bin/activate
+pip install flask
+python3 app.py
 
-Usa TAP: atmega2560.cpu
-Sube el BSDL FULL_BOUNDARY.
+Abrir en navegador:
+http://IP_DE_TU_PI:8088
 
-Colores:
-- Verde: pin probado y no vio otro pin cambiar junto con él.
-- Rojo: posible corto/fallo porque otro pin cambió junto con el pin probado.
-- Naranja: pin no probado porque no tiene celda data/control suficiente.
-
-Nota: Sin netlist esto detecta sospechas, no confirma 100% todas las conexiones correctas.
+No hace revision JTAG todavia. Este es solo el paso de lectura del BSDL.
