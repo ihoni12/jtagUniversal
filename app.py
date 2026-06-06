@@ -80,46 +80,101 @@ class OpenOCD:
 def parse_bsdl(text):
     ent = re.search(r'entity\s+(\w+)\s+is', text, re.I)
     entity = ent.group(1) if ent else 'UNKNOWN'
+
     ilen = None
     m = re.search(r'INSTRUCTION_LENGTH\s+of\s+\w+\s*:\s*entity\s+is\s+(\d+)', text, re.I)
-    if m: ilen=int(m.group(1))
+    if m:
+        ilen = int(m.group(1))
+
     blen = None
     m = re.search(r'BOUNDARY_LENGTH\s+of\s+\w+\s*:\s*entity\s+is\s+(\d+)', text, re.I)
-    if m: blen=int(m.group(1))
-    # Opcodes: NAME (bits)
+    if m:
+        blen = int(m.group(1))
+
+    # Opcodes: EXTEST (0000), SAMPLE/PRELOAD (0010), etc.
     ops = {}
-    for name,bits in re.findall(r'([A-Z0-9_\/]+)\s*\(\s*([01]+)\s*\)', text, re.I):
-        ops[name.upper()] = bits
-    # Boundary cells, supports: 164 (BC_1, PG5, output3, X, 163, 0, Z)
-    cells=[]
-    for line in text.splitlines():
-        line=line.strip().strip('"').rstrip('&').rstrip(',')
-        m=re.match(r'(\d+)\s*\(\s*([^,]+),\s*([^,]+),\s*([^,]+),', line)
-        if m:
-            bit=int(m.group(1)); cell=m.group(2).strip(); port=m.group(3).strip(); typ=m.group(4).strip().lower()
-            cells.append({'bit':bit,'cell':cell,'port':port,'type':typ,'raw':line})
-    # fallback: parse SignalName table style from our generated BSDL comments/attribute if needed
+    opcode_block = re.search(r'INSTRUCTION_OPCODE.*?is(.*?);', text, re.I | re.S)
+    if opcode_block:
+        for name, bits in re.findall(r'([A-Z0-9_\/]+)\s*\(\s*([01]+)\s*\)', opcode_block.group(1), re.I):
+            ops[name.upper()] = bits
+
+    # Parse real BSDL boundary lines, including output3 control reference:
+    # 164 (BC_1, PG5, output3, X, 163, 0, Z)
+    # 163 (BC_1, *, control, 1)
+    cells = []
+    bit_to_control_owner = {}  # control_bit -> pin name, learned from output3/bidir line
+
+    for raw in text.splitlines():
+        line = raw.strip().strip('"').rstrip('&').rstrip(',').strip()
+        m = re.match(r'^(\d+)\s*\((.*)\)\s*$', line)
+        if not m:
+            continue
+        bit = int(m.group(1))
+        parts = [x.strip() for x in m.group(2).split(',')]
+        if len(parts) < 3:
+            continue
+        cell = parts[0]
+        port = parts[1].upper()
+        typ = parts[2].lower()
+        control_ref = None
+        if typ in ('output3', 'bidir', 'output2') and len(parts) >= 5:
+            try:
+                control_ref = int(parts[4])
+            except Exception:
+                control_ref = None
+        cells.append({'bit': bit, 'cell': cell, 'port': port, 'type': typ, 'control_ref': control_ref, 'raw': line})
+        if port not in ('*', 'INTERNAL') and control_ref is not None:
+            bit_to_control_owner[control_ref] = port
+
+    # Fallback for table-style text: 164 PG5.Data / 163 PG5.Control
     if not cells:
         for bit, sig in re.findall(r'(\d+)\s+([A-Z]{1,2}\d\.(?:Data|Control)|RSTT)', text, re.I):
-            bit=int(bit); sig=sig.upper()
+            bit = int(bit)
+            sig = sig.upper()
             if sig.endswith('.DATA'):
-                port=sig.split('.')[0]; typ='bidir'
+                port = sig.split('.')[0]
+                typ = 'output3'
+                control_ref = None
             elif sig.endswith('.CONTROL'):
-                port=sig.split('.')[0]; typ='control'
+                port = sig.split('.')[0]
+                typ = 'control'
+                control_ref = None
             else:
-                port=sig; typ='observe_only'
-            cells.append({'bit':bit,'cell':'BC_1','port':port,'type':typ,'raw':sig})
-    pins={}
+                port = sig
+                typ = 'observe_only'
+                control_ref = None
+            cells.append({'bit': bit, 'cell': 'BC_1', 'port': port, 'type': typ, 'control_ref': control_ref, 'raw': sig})
+
+    pins = {}
     for c in cells:
-        p=c['port'].upper()
-        if p in ('*','INTERNAL'): continue
-        pins.setdefault(p, {'name':p, 'data_bits':[], 'control_bits':[], 'observe_bits':[]})
-        if 'control' in c['type'] or p.endswith('.CONTROL'):
+        p = c['port'].upper()
+
+        # In valid BSDL control cells often have port='*'. Attach them to the pin that referenced this control bit.
+        if p == '*' and 'control' in c['type']:
+            p = bit_to_control_owner.get(c['bit'], '*')
+
+        if p in ('*', 'INTERNAL'):
+            continue
+
+        pins.setdefault(p, {'name': p, 'data_bits': [], 'control_bits': [], 'observe_bits': []})
+
+        if 'control' in c['type']:
             pins[p]['control_bits'].append(c['bit'])
-        elif 'input' in c['type'] or 'observe' in c['type'] or p=='RSTT':
+        elif c['type'] in ('input', 'observe_only') or p == 'RSTT':
             pins[p]['observe_bits'].append(c['bit'])
         else:
+            # output3/bidir/data cells are both drive data and readable during scan.
             pins[p]['data_bits'].append(c['bit'])
+            if c.get('control_ref') is not None:
+                if c['control_ref'] not in pins[p]['control_bits']:
+                    pins[p]['control_bits'].append(c['control_ref'])
+
+    # Clean invalid/duplicate bits and sort high-to-low for human readability.
+    for p in pins.values():
+        p['data_bits'] = sorted(set(p['data_bits']), reverse=True)
+        p['control_bits'] = sorted(set(p['control_bits']), reverse=True)
+        p['observe_bits'] = sorted(set(p['observe_bits']), reverse=True)
+
     return entity, ilen, blen, ops, pins
 
 def bitstring_to_list(hexstr, blen):
