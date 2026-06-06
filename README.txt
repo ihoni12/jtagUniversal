@@ -1,32 +1,34 @@
-LECTOR SIMPLE DE BSDL
-======================
+LECTOR BSDL CON CLIENTE WEB
+===========================
 
-Este programa recibe un archivo .bsdl y muestra la informacion separada:
+Este paquete tiene 2 formas de uso:
 
-1) CHIP / ENTITY
-2) PUERTOS / PINES DECLARADOS
-3) INSTRUCCIONES JTAG
-4) IDCODE
-5) BOUNDARY REGISTER
-6) OTROS ATRIBUTOS IMPORTANTES
+1) Modo consola:
+   python3 bsdl_reader.py archivo.bsdl
 
-COMO USARLO
-===========
+2) Modo web / cliente desde otra computadora:
+   python3 web_server.py
 
-1) Entra a la carpeta:
-   cd bsdl_reader
-
-2) Ejecuta:
-   python bsdl_reader.py tu_archivo.bsdl
+Luego abre desde tu computadora:
+   http://IP_DE_TU_RASPBERRY:8088
 
 Ejemplo:
-   python bsdl_reader.py atmega2560.bsdl
+   http://192.168.1.50:8088
 
-En Raspberry Pi normalmente tambien funciona asi:
-   python3 bsdl_reader.py atmega2560.bsdl
+El programa imprime en la terminal la direccion correcta cuando inicia.
 
-NOTA
-====
-Este programa solo lee y separa la informacion del BSDL.
-No conecta al chip, no hace JTAG, no revisa cortos.
-PYTHON NECESARIO: Python 3.
+Si quieres otro puerto:
+   python3 web_server.py 8090
+
+Notas:
+- No necesita Flask ni instalar librerias externas.
+- Solo usa Python 3.
+- Solo lee y separa informacion del archivo BSDL.
+- No conecta al chip todavia.
+
+Si no abre desde tu computadora:
+1. Verifica que Raspberry y computadora esten en la misma red.
+2. Mira la IP con:
+   hostname -I
+3. Prueba en la Raspberry:
+   curl http://127.0.0.1:8088
