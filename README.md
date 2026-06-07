@@ -1,35 +1,32 @@
-# JTAG Web Station
+# Estación JTAG Universal
 
-Interfaz web para subir un archivo BSDL desde tu computadora y ejecutar una revision JTAG Boundary Scan en la Raspberry Pi.
+Frontend + backend para Raspberry Pi con OpenOCD. Permite subir BSDL y netlist desde el navegador, ejecutar revisión JTAG y ver una salida simple.
 
-## Estructura
+## Qué revisa
 
-```text
-backend/   Servidor Flask + script JTAG
-frontend/  Web React/Vite
-```
+- Cortos generales entre pines Boundary Scan.
+- Conexiones permitidas según netlist.
+- Líneas externas hacia Raspberry Pi definidas como `PI.GPIOxx`.
+- UART, SPI, I2C y GPIO simples se detectan por nombre de net: `TX`, `RX`, `MOSI`, `MISO`, `SCK`, `SCL`, `SDA`, `CS`, etc.
 
-## 1. Instalar backend en la Raspberry
+## Ejecutar backend
 
 ```bash
 cd backend
 python3 -m venv venv
 source venv/bin/activate
 pip install -r requirements.txt
+sudo ./start_backend.sh
+```
+
+O directo:
+
+```bash
+cd backend
 sudo python3 app.py
 ```
 
-El backend queda en:
-
-```text
-http://IP_DE_TU_RASPBERRY:5000
-```
-
-Nota: si `sudo python3 app.py` no usa el venv, puedes instalar Flask globalmente o ejecutar sin venv si ya tienes dependencias instaladas.
-
-## 2. Instalar frontend en la Raspberry
-
-En otra terminal:
+## Ejecutar frontend
 
 ```bash
 cd frontend
@@ -37,62 +34,60 @@ npm install
 npm run dev -- --host 0.0.0.0
 ```
 
-La web queda en:
+Abre desde tu computadora:
 
 ```text
-http://IP_DE_TU_RASPBERRY:5173
+http://IP_DE_LA_PI:5173
 ```
 
-Desde tu computadora entra a esa direccion.
-
-## 3. Uso
-
-1. Abre la web.
-2. Sube el archivo `.bsdl` desde tu computadora.
-3. Aprieta **Iniciar revision**.
-4. Mira el progreso en vivo.
-
-## Pines JTAG fijos en la Raspberry
-
-El script usa:
+## Netlist simple
 
 ```text
-TCK = GPIO11
-TMS = GPIO25
-TDI = GPIO10
-TDO = GPIO9
-Velocidad = 10 kHz
+NET_UART0_TX
+  U1.PE1
+  PI.GPIO15
+
+NET_UART0_RX
+  U1.PE0
+  PI.GPIO14
 ```
 
-Si cambias el cableado, modifica estos valores en:
-
-```text
-backend/mega_jtag_bsdl_test.py
-```
-
-## Netlist en la web
-
-Esta version permite subir tambien un archivo Netlist opcional desde la interfaz web.
-
-- Si subes solo BSDL: hace revision general de cortos.
-- Si subes BSDL + Netlist: compara los cortos detectados contra el netlist y separa:
-  - OK_SEGUN_NETLIST
-  - CORTO_SOSPECHOSO
-  - NO_MEDIBLE_DIRECTO
-  - OPEN_POSIBLE / BRIDGE_POSIBLE / MIXTO cuando se puede medir directo.
-
-El backend ejecuta:
+## Modo terminal sin frontend
 
 ```bash
-sudo python3 -u mega_jtag_bsdl_netlist_test.py archivo.bsdl archivo.net --uut-ref U1 --netlist-test
+cd backend
+sudo python3 mega_jtag_bsdl_netlist_test.py ../ATMEGA2560_table28_1_CORREGIDO\ \(1\).bsdl ../examples/test_shorts_expected.net --external-line-test --netlist-test
 ```
 
-## Salida de consola
+## Nota importante
 
-La revisión ahora usa salida corta por defecto: muestra inicio, progreso, resumen y errores importantes.
+Para revisar una línea externa, tiene que existir cable físico entre el pin del UUT y el GPIO de la Raspberry. El netlist solo le dice al programa qué debe esperar.
 
-Para ver cada pin y cada net con detalle:
 
-```bash
-sudo python3 backend/mega_jtag_bsdl_netlist_test.py archivo.bsdl placa.net --uut-ref U1 --netlist-test --verbose
+## Líneas externas visibles
+En el frontend aparece una caja llamada **Líneas externas detectadas**.
+Ahí se muestran automáticamente las nets del netlist que tengan U1.PIN conectado a PI.GPIOxx.
+Ejemplos:
+
+```net
+NET_UART0_TX
+  U1.PE1
+  PI.GPIO15
+
+NET_UART0_RX
+  U1.PE0
+  PI.GPIO14
+
+NET_SPI_MOSI
+  U1.PB2
+  PI.GPIO10
+
+NET_I2C_SCL
+  U1.PD0
+  PI.GPIO3
 ```
+
+Direcciones automáticas:
+- TX, MOSI, SCK, CLK, CS, SCL: UUT_TO_PI.
+- RX, MISO: PI_TO_UUT.
+- Con `Probar ambas direcciones`, prueba ambas.

@@ -1,0 +1,33 @@
+# NETLIST FALSO SOLO PARA PROBAR EL PROGRAMA
+# Sirve para verificar que el programa lea el netlist y marque algunos cortos como OK_SEGUN_NETLIST.
+
+NET_TEST_PE3_PB2
+  U1.PE3
+  U1.PB2
+
+NET_TEST_PE4_PA2_PA3_PB2
+  U1.PE4
+  U1.PA2
+  U1.PA3
+  U1.PB2
+
+NET_TEST_PH3_PH4
+  U1.PH3
+  U1.PH4
+
+NET_TEST_PB1_PB2_PB3
+  U1.PB1
+  U1.PB2
+  U1.PB3
+
+NET_TEST_PK4_PK3
+  U1.PK4
+  U1.PK3
+
+NET_UART0_TX
+  U1.PE1
+  PI.GPIO15
+
+NET_UART0_RX
+  U1.PE0
+  PI.GPIO14

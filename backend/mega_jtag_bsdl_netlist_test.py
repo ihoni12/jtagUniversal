@@ -18,9 +18,6 @@ JTAG_TDI = 10
 JTAG_TDO = 9
 JTAG_SPEED = 10
 
-# Salida corta por defecto. Usa --verbose para ver cada pin/net y salida completa de OpenOCD.
-VERBOSE = False
-
 # Cambia esto si tu netlist usa otro nombre para el micro.
 # Ejemplos: U1, IC1, ATMEGA2560, MEGA2560
 DEFAULT_UUT_REFS = ["U1", "IC1", "ATMEGA2560", "MEGA2560", "ATMEGA", "ARDUINO"]
@@ -441,33 +438,29 @@ def describe_connections(conns):
 
 
 def print_test_summary(short_report=None, net_report=None):
-    print("\n=================================")
-    print("RESULTADO")
-    print("=================================")
+    print("\n=== RESUMEN COMO SE DEBE ===")
 
     if short_report is not None:
         counts = defaultdict(int)
         for row in short_report:
             counts[row["status"]] += 1
 
-        total = len(short_report)
-        print(f"Pines revisados: {total}")
-        print(f"OK sin corto: {counts['OK_SIN_CORTO']}")
-        print(f"OK segun netlist: {counts['OK_SEGUN_NETLIST']}")
-        print(f"Cortos sospechosos: {counts['CORTO_SOSPECHOSO']}")
+        print("\nCortos / conexiones detectadas:")
+        print(f"  OK sin seguidores extra: {counts['OK_SIN_CORTO']}")
+        print(f"  OK porque el netlist permite la conexión: {counts['OK_SEGUN_NETLIST']}")
+        print(f"  CORTO SOSPECHOSO no permitido por netlist: {counts['CORTO_SOSPECHOSO']}")
 
         bad = [r for r in short_report if r["status"] == "CORTO_SOSPECHOSO"]
         if bad:
-            print("\nERRORES DETECTADOS")
+            print("\nCortos sospechosos reales:")
             for r in bad:
-                print(f"- CORTO: {r['driver']} -> {', '.join(r['unexpected_followers'])}")
-                if VERBOSE:
-                    if r.get("driver_nets"):
-                        print(f"    Netlist de {r['driver']}: {', '.join(r['driver_nets'])}")
-                    for p, nets in r.get("unexpected_follower_nets", {}).items():
-                        print(f"    {p}: {', '.join(nets) if nets else 'SIN_NET'}")
+                print(f"  {r['driver']} -> {', '.join(r['unexpected_followers'])}")
+                if r.get("driver_nets"):
+                    print(f"     Netlist del pin {r['driver']}: {', '.join(r['driver_nets'])}")
+                for p, nets in r.get("unexpected_follower_nets", {}).items():
+                    print(f"     {p} aparece en netlist como: {', '.join(nets) if nets else 'SIN_NET'}")
         else:
-            print("No hay cortos sospechosos fuera del netlist.")
+            print("  No hay cortos sospechosos fuera del netlist.")
 
     if net_report is not None:
         counts = defaultdict(int)
@@ -475,24 +468,342 @@ def print_test_summary(short_report=None, net_report=None):
             counts[r["status"]] += 1
 
         print("\nRevisión contra netlist:")
-        print(f"OK: {counts['OK']}")
-        print(f"OPEN posible: {counts['OPEN_POSIBLE']}")
-        print(f"BRIDGE posible: {counts['BRIDGE_POSIBLE']}")
-        print(f"Mixto: {counts['MIXTO']}")
-        print(f"No medible directo: {counts['NO_MEDIBLE_DIRECTO']}")
+        for key in ["OK", "OPEN_POSIBLE", "BRIDGE_POSIBLE", "MIXTO", "NO_MEDIBLE_DIRECTO"]:
+            print(f"  {key}: {counts[key]}")
 
         problems = [r for r in net_report if r["status"] in ["OPEN_POSIBLE", "BRIDGE_POSIBLE", "MIXTO"]]
         if problems:
             print("\nProblemas por NET:")
             for r in problems:
-                print(f"- {r['net']} desde {r['driver']} -> {r['status']}")
+                print(f"  {r['net']} desde {r['driver']} -> {r['status']}")
                 if r.get("missing"):
-                    print(f"    Faltan: {', '.join(r['missing'])}")
+                    print(f"     Faltan: {', '.join(r['missing'])}")
                 if r.get("extra"):
-                    print(f"    Extras/no permitidos: {', '.join(r['extra'])}")
+                    print(f"     Extras/no permitidos: {', '.join(r['extra'])}")
         else:
-            print("No hay fallos medibles contra el netlist.")
+            print("  No hay fallos medibles contra el netlist.")
 
+
+
+# ---------------- EXTERNAL PI LINE / PROTOCOL-LIKE TESTS ----------------
+
+PI_REFS = {"PI", "RPI", "RASPBERRY", "RASPBERRYPI", "RASPBERRY_PI"}
+
+def extract_gpio_number(value):
+    """Acepta GPIO17, 17, PIN11_GPIO17, etc."""
+    s = str(value).upper()
+    m = re.search(r"GPIO\s*([0-9]+)", s)
+    if m:
+        return int(m.group(1))
+    if s.isdigit():
+        return int(s)
+    return None
+
+
+def connection_pi_gpio(conn):
+    """Detecta conexiones tipo PI.GPIO17, RPI.17, RASPBERRY.GPIO22."""
+    ref = normalize_ref(conn.get("ref", ""))
+    pin = conn.get("pin", "")
+    raw = conn.get("raw", "")
+    if ref in PI_REFS:
+        return extract_gpio_number(pin)
+    if "GPIO" in str(raw).upper() and any(x in str(raw).upper() for x in ["PI", "RPI", "RASPBERRY"]):
+        return extract_gpio_number(raw)
+    return None
+
+
+def classify_external_direction(net_name, uut_pin, external_bidir=False):
+    """
+    Decide dirección automática:
+      UUT_TO_PI: JTAG maneja pin del chip, Pi lee.
+      PI_TO_UUT: Pi maneja GPIO, JTAG lee pin del chip.
+      BOTH: hace ambas direcciones.
+    """
+    n = f"{net_name}_{uut_pin}".upper()
+
+    if external_bidir:
+        return "BOTH"
+
+    # Señales que normalmente salen del micro/controlador hacia afuera.
+    if any(k in n for k in ["TX", "MOSI", "SCK", "SCLK", "CLK", "CLOCK", "CS", "SS", "SCL"]):
+        return "UUT_TO_PI"
+
+    # Señales que normalmente entran al micro/controlador.
+    if any(k in n for k in ["RX", "MISO"]):
+        return "PI_TO_UUT"
+
+    # SDA es bidireccional, pero para una prueba simple lo manejamos desde JTAG hacia Pi.
+    if "SDA" in n:
+        return "UUT_TO_PI"
+
+    return "UUT_TO_PI"
+
+
+def build_external_line_tests(nets, bsdl_pins, uut_ref, external_bidir=False):
+    """
+    Busca en el netlist conexiones entre el chip JTAG y la Raspberry:
+      NET_UART_TX
+        U1.PE1
+        PI.GPIO15
+
+    Devuelve pruebas donde un extremo es UUT/BSDL y otro es PI.GPIOx.
+    """
+    tests = []
+    bsdl_names = set(bsdl_pins.keys())
+
+    for net_name, conns in (nets or {}).items():
+        uut_pins = [
+            normalize_pin_token(c["pin"])
+            for c in conns
+            if c["ref"] == uut_ref and normalize_pin_token(c["pin"]) in bsdl_names
+        ]
+
+        pi_gpios = []
+        for c in conns:
+            gpio = connection_pi_gpio(c)
+            if gpio is not None:
+                pi_gpios.append(gpio)
+
+        for pin in sorted(set(uut_pins)):
+            for gpio in sorted(set(pi_gpios)):
+                tests.append({
+                    "net": net_name,
+                    "uut_pin": pin,
+                    "pi_gpio": gpio,
+                    "direction": classify_external_direction(net_name, pin, external_bidir),
+                    "connections": conns,
+                })
+
+    return tests
+
+
+def _run_cmd_quiet(args, timeout=2):
+    try:
+        return subprocess.run(args, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=timeout)
+    except Exception as e:
+        class R:
+            returncode = 999
+            stdout = ""
+            stderr = str(e)
+        return R()
+
+
+def pi_read_gpio(gpio, chip="0"):
+    """
+    Lee GPIO de la Pi probando varias sintaxis de libgpiod.
+
+    En Raspberry/libgpiod hay 2 familias comunes:
+      v1: gpioget gpiochip0 15
+      v2: gpioget GPIO15  o  gpioget --chip gpiochip0 GPIO15
+
+    Por eso se prueban nombres de línea GPIOxx y offsets numéricos.
+    """
+    gpio = int(gpio)
+    chip_name = f"gpiochip{chip}" if str(chip).isdigit() else str(chip)
+    dev_chip = f"/dev/{chip_name}" if not str(chip_name).startswith("/dev/") else chip_name
+
+    candidates = [
+        ["gpioget", f"GPIO{gpio}"],
+        ["gpioget", "--chip", chip_name, f"GPIO{gpio}"],
+        ["gpioget", "--chip", dev_chip, f"GPIO{gpio}"],
+        ["gpioget", chip_name, f"GPIO{gpio}"],
+        ["gpioget", dev_chip, f"GPIO{gpio}"],
+        ["gpioget", str(chip), str(gpio)],
+        ["gpioget", chip_name, str(gpio)],
+        ["gpioget", dev_chip, str(gpio)],
+    ]
+
+    errors = []
+    for cmdline in candidates:
+        r = _run_cmd_quiet(cmdline)
+        out = (r.stdout + "\n" + r.stderr).strip()
+        errors.append(" ".join(cmdline) + " -> " + out)
+        lines = [x.strip() for x in out.splitlines() if x.strip()]
+        for line in lines:
+            if line in ["0", "1"]:
+                return int(line)
+
+        # libgpiod v2 en Raspberry puede devolver:
+        #   "GPIO15"=inactive
+        #   "GPIO15"=active
+        # Eso ES una lectura válida: inactive=0, active=1.
+        if r.returncode == 0:
+            low = out.lower()
+            if re.search(r"\binactive\b", low):
+                return 0
+            if re.search(r"\bactive\b", low):
+                return 1
+
+        m = re.search(r"(?:=|:)\s*([01])\b", out)
+        if r.returncode == 0 and m:
+            return int(m.group(1))
+
+    raise RuntimeError(f"No pude leer PI GPIO{gpio}. " + " | ".join(errors))
+
+
+def pi_drive_gpio_process(gpio, level, chip="0"):
+    """Mantiene un GPIO de la Pi en 0/1 mientras se toma una lectura."""
+    gpio = int(gpio)
+    level = int(level)
+    chip_name = f"gpiochip{chip}" if str(chip).isdigit() else str(chip)
+    dev_chip = f"/dev/{chip_name}" if not str(chip_name).startswith("/dev/") else chip_name
+
+    candidates = [
+        ["gpioset", f"GPIO{gpio}={level}"],
+        ["gpioset", "--chip", chip_name, f"GPIO{gpio}={level}"],
+        ["gpioset", "--chip", dev_chip, f"GPIO{gpio}={level}"],
+        ["gpioset", "--mode=signal", str(chip), f"{gpio}={level}"],
+        ["gpioset", "--mode=signal", chip_name, f"{gpio}={level}"],
+        ["gpioset", "--mode=signal", dev_chip, f"{gpio}={level}"],
+        ["gpioset", str(chip), f"{gpio}={level}"],
+        ["gpioset", chip_name, f"{gpio}={level}"],
+        ["gpioset", dev_chip, f"{gpio}={level}"],
+    ]
+
+    errors = []
+    for cmdline in candidates:
+        try:
+            p = subprocess.Popen(cmdline, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+            time.sleep(0.10)
+            if p.poll() is None:
+                return p
+            out, err = p.communicate(timeout=1)
+            errors.append(" ".join(cmdline) + " -> " + (out + err).strip())
+        except Exception as e:
+            errors.append(" ".join(cmdline) + " -> " + str(e))
+
+    raise RuntimeError("No pude manejar GPIO con gpioset. " + " | ".join(errors))
+
+
+def stop_pi_drive_process(proc):
+    try:
+        proc.terminate()
+        proc.wait(timeout=0.5)
+    except Exception:
+        try:
+            proc.kill()
+        except Exception:
+            pass
+
+
+def make_all_inputs_pattern(pins):
+    value = 0
+    for _, p in pins.items():
+        cb = p.get("control_bit")
+        if cb is not None:
+            value &= ~(1 << cb)
+    return value
+
+
+def test_uut_to_pi_line(sock, tap, extest, sample_opcode, bits, pins, uut_pin, pi_gpio, pi_chip="0"):
+    """
+    JTAG pone UUT pin en 0 y 1; Raspberry lee su GPIO.
+    PASS si Pi lee el mismo patrón.
+    """
+    reads = []
+    for level in [0, 1, 0, 1]:
+        pattern = make_pattern(pins, uut_pin, level)
+        extest_write(sock, tap, extest, bits, pattern)
+        time.sleep(0.03)
+        got = pi_read_gpio(pi_gpio, chip=pi_chip)
+        reads.append({"sent": level, "read": got})
+
+    ok = all(x["sent"] == x["read"] for x in reads)
+    return {"direction": "UUT_TO_PI", "ok": ok, "samples": reads}
+
+
+def test_pi_to_uut_line(sock, tap, extest, sample_opcode, bits, pins, uut_pin, pi_gpio, pi_chip="0"):
+    """
+    Raspberry pone GPIO en 0 y 1; JTAG lee el pin UUT con SAMPLE.
+    PASS si JTAG lee el mismo patrón.
+    """
+    reads = []
+    # Deja UUT como entrada/alta impedancia antes de que la Pi maneje la línea.
+    extest_write(sock, tap, extest, bits, make_all_inputs_pattern(pins))
+
+    for level in [0, 1, 0, 1]:
+        proc = None
+        try:
+            proc = pi_drive_gpio_process(pi_gpio, level, chip=pi_chip)
+            time.sleep(0.05)
+            val = sample(sock, tap, sample_opcode, bits)
+            states = read_pin_states(pins, val)
+            got = states.get(uut_pin)
+            reads.append({"sent": level, "read": got})
+        finally:
+            if proc:
+                stop_pi_drive_process(proc)
+
+    ok = all(x["sent"] == x["read"] for x in reads)
+    return {"direction": "PI_TO_UUT", "ok": ok, "samples": reads}
+
+
+def run_external_line_tests(sock, tap, extest, sample_opcode, bits, pins, external_tests, pi_chip="0"):
+    """
+    Revisión práctica de líneas conectadas a la Raspberry según netlist.
+    No implementa TCP/I2C completo; verifica que los 0/1 llegan entre JTAG y la Pi.
+    Sirve para UART TX/RX, I2C SDA/SCL, SPI MOSI/MISO/SCK/CS, GPIO, etc.
+    """
+    print("\n=== REVISION DE LINEAS HACIA RASPBERRY SEGUN NETLIST ===")
+    print("Verifica 0/1 entre pines del chip manejados por JTAG y GPIOs de la Pi.")
+    print("Formato esperado en netlist: U1.PE1 + PI.GPIO15, RPI.GPIO17, etc.\n")
+
+    report = []
+
+    if not external_tests:
+        print("No encontré conexiones UUT <-> PI.GPIO en el netlist.")
+        return report
+
+    total = len(external_tests)
+    for i, t in enumerate(external_tests, start=1):
+        print(f"[{i}/{total}] {t['net']}: UUT {t['uut_pin']} <-> PI.GPIO{t['pi_gpio']} ({t['direction']})")
+        entry = dict(t)
+        entry["results"] = []
+
+        try:
+            if t["direction"] in ["UUT_TO_PI", "BOTH"]:
+                r = test_uut_to_pi_line(sock, tap, extest, sample_opcode, bits, pins, t["uut_pin"], t["pi_gpio"], pi_chip)
+                entry["results"].append(r)
+
+            if t["direction"] in ["PI_TO_UUT", "BOTH"]:
+                r = test_pi_to_uut_line(sock, tap, extest, sample_opcode, bits, pins, t["uut_pin"], t["pi_gpio"], pi_chip)
+                entry["results"].append(r)
+
+            entry["status"] = "OK" if entry["results"] and all(r["ok"] for r in entry["results"]) else "FAIL"
+            print("   " + ("[OK]" if entry["status"] == "OK" else "[FAIL]"))
+
+        except Exception as e:
+            entry["status"] = "ERROR"
+            entry["error"] = str(e)
+            print(f"   [ERROR] {e}")
+
+        report.append(entry)
+
+    return report
+
+
+def print_external_line_summary(external_report):
+    if external_report is None:
+        return
+
+    counts = defaultdict(int)
+    for r in external_report:
+        counts[r.get("status", "UNKNOWN")] += 1
+
+    print("\nRevision de lineas conectadas a la Pi:")
+    print(f"  OK: {counts['OK']}")
+    print(f"  FAIL: {counts['FAIL']}")
+    print(f"  ERROR: {counts['ERROR']}")
+
+    bad = [r for r in external_report if r.get("status") in ["FAIL", "ERROR"]]
+    if bad:
+        print("\nLineas con problema:")
+        for r in bad:
+            print(f"  {r['net']}: UUT {r['uut_pin']} <-> PI.GPIO{r['pi_gpio']} -> {r.get('status')}")
+            if r.get("error"):
+                print(f"     Error: {r['error']}")
+            for result in r.get("results", []):
+                print(f"     {result['direction']}: {result['samples']}")
 
 # ---------------- OpenOCD/JTAG ----------------
 
@@ -555,16 +866,13 @@ def extract_hex(output):
 
 
 def start_openocd(cfg_path):
-    print("JTAG: iniciando OpenOCD...")
-    if VERBOSE:
-        proc = subprocess.Popen(["openocd", "-f", cfg_path])
-    else:
-        proc = subprocess.Popen(["openocd", "-f", cfg_path], stdout=subprocess.DEVNULL, stderr=subprocess.STDOUT)
+    print("Iniciando OpenOCD...")
+    proc = subprocess.Popen(["openocd", "-f", cfg_path])
     end = time.time() + 10
     while time.time() < end:
         try:
             sock = socket.create_connection((HOST, PORT), timeout=1)
-            print("JTAG: OpenOCD conectado")
+            print("OpenOCD abierto y conectado.")
             return proc, sock
         except OSError:
             time.sleep(0.3)
@@ -657,21 +965,15 @@ def test_one_pin(sock, tap, extest, sample_opcode, bits, pins, pin):
 
 
 def run_short_test(sock, tap, extest, sample_opcode, bits, pins, board_map=None):
-    print("\nRevisando cortos...")
+    print("\n=== PRUEBA DE CORTOS VALIDADA CON NETLIST ===")
+    print("Si un pin sigue al otro, primero reviso si el netlist dice que esa conexión es correcta.")
+    print("Sólo marco CORTO si la conexión NO aparece permitida en el netlist.\n")
+
     pin_to_nets, same_net_pins = build_pin_net_lookup(board_map)
     results = []
-    total = len(pins)
-    last_pct = -1
 
-    for i, pin in enumerate(pins, start=1):
-        if VERBOSE:
-            print(f"Probando {pin}...")
-        else:
-            pct = int(i * 100 / total) if total else 100
-            if pct >= last_pct + 10 or pct == 100:
-                print(f"  {pct}%")
-                last_pct = pct
-
+    for pin in pins:
+        print(f"Probando {pin}...")
         r = test_one_pin(sock, tap, extest, sample_opcode, bits, pins, pin)
         followers = set(r["followers"])
         allowed = set(same_net_pins.get(pin, set()))
@@ -681,18 +983,15 @@ def run_short_test(sock, tap, extest, sample_opcode, bits, pins, board_map=None)
 
         if unexpected_followers:
             status = "CORTO_SOSPECHOSO"
-            if VERBOSE:
-                print(f"  [CORTO?] no permitido por netlist: {unexpected_followers}")
-                if expected_followers:
-                    print(f"  [OK NETLIST] permitido: {expected_followers}")
+            print(f"  [CORTO?] seguidores NO permitidos por netlist: {unexpected_followers}")
+            if expected_followers:
+                print(f"  [OK NETLIST] seguidores permitidos: {expected_followers}")
         elif expected_followers:
             status = "OK_SEGUN_NETLIST"
-            if VERBOSE:
-                print(f"  [OK NETLIST] conexión esperada: {expected_followers}")
+            print(f"  [OK NETLIST] conexión esperada detectada: {expected_followers}")
         else:
             status = "OK_SIN_CORTO"
-            if VERBOSE:
-                print("  [OK]")
+            print("  [OK] no siguió ningún pin extra")
 
         results.append({
             "driver": pin,
@@ -708,22 +1007,21 @@ def run_short_test(sock, tap, extest, sample_opcode, bits, pins, board_map=None)
             "raw": r,
         })
 
-    print("Revisión de cortos completada")
     return results
 
 
 def run_netlist_test(sock, tap, extest, sample_opcode, bits, pins, board_map):
-    print("\nRevisando conexiones del netlist...")
+    print("\n=== PRUEBA SEGÚN NETLIST ===")
+    print("Sólo puedo verificar conexiones donde ambos extremos son pines Boundary Scan del mismo chip.")
+    print("Si el otro extremo es resistencia, conector, memoria sin JTAG, etc., queda en el mapa pero no se puede leer directo.\n")
+
     report = []
-    measurable_items = [x for x in board_map if x.get("expected_same_chip_pins")]
-    total = len(measurable_items)
-    done = 0
-    last_pct = -1
 
     for item in board_map:
         driver = item["driver"]
         expected = set(item["expected_same_chip_pins"])
 
+        # Si la net no tiene otro pin JTAG del mismo chip, no se puede verificar continuidad directa.
         if not expected:
             report.append({
                 "net": item["net"],
@@ -737,15 +1035,7 @@ def run_netlist_test(sock, tap, extest, sample_opcode, bits, pins, board_map):
             })
             continue
 
-        done += 1
-        if VERBOSE:
-            print(f"Probando net {item['net']} desde {driver}...")
-        else:
-            pct = int(done * 100 / total) if total else 100
-            if pct >= last_pct + 10 or pct == 100:
-                print(f"  {pct}%")
-                last_pct = pct
-
+        print(f"Probando net {item['net']} desde {driver}...")
         r = test_one_pin(sock, tap, extest, sample_opcode, bits, pins, driver)
         observed = set(r["followers"])
 
@@ -754,20 +1044,16 @@ def run_netlist_test(sock, tap, extest, sample_opcode, bits, pins, board_map):
 
         if not missing and not extra:
             status = "OK"
-            if VERBOSE:
-                print("  [OK]")
+            print("  [OK] conexiones esperadas detectadas")
         elif missing and not extra:
             status = "OPEN_POSIBLE"
-            if VERBOSE:
-                print(f"  [OPEN?] no respondieron: {missing}")
+            print(f"  [OPEN?] no respondieron: {missing}")
         elif extra and not missing:
             status = "BRIDGE_POSIBLE"
-            if VERBOSE:
-                print(f"  [BRIDGE?] pines no esperados: {extra}")
+            print(f"  [BRIDGE?] respondieron pines no esperados: {extra}")
         else:
             status = "MIXTO"
-            if VERBOSE:
-                print(f"  [MIXTO] faltan {missing}, extras {extra}")
+            print(f"  [MIXTO] faltan {missing}, extras {extra}")
 
         report.append({
             "net": item["net"],
@@ -780,11 +1066,10 @@ def run_netlist_test(sock, tap, extest, sample_opcode, bits, pins, board_map):
             "connections": item["all_connections"],
         })
 
-    print("Revisión del netlist completada")
     return report
 
 
-def save_reports(out_dir, info, nets=None, board_map=None, net_report=None, short_results=None, unknown_uut_pins=None):
+def save_reports(out_dir, info, nets=None, board_map=None, net_report=None, short_results=None, unknown_uut_pins=None, external_report=None):
     os.makedirs(out_dir, exist_ok=True)
 
     pins_path = os.path.join(out_dir, "bsdl_pins.json")
@@ -810,6 +1095,10 @@ def save_reports(out_dir, info, nets=None, board_map=None, net_report=None, shor
     if short_results is not None:
         with open(os.path.join(out_dir, "short_test_report.json"), "w") as f:
             json.dump(short_results, f, indent=2)
+
+    if external_report is not None:
+        with open(os.path.join(out_dir, "external_line_test_report.json"), "w") as f:
+            json.dump(external_report, f, indent=2)
 
     print(f"\nReportes guardados en: {out_dir}")
 
@@ -893,11 +1182,10 @@ def main():
     parser.add_argument("--print-netlist", action="store_true", help="Imprime todas las nets y conexiones leídas del netlist")
     parser.add_argument("--print-board-map", action="store_true", help="Imprime cómo se mapeó el netlist contra los pines del BSDL")
     parser.add_argument("--print-limit", type=int, default=0, help="Límite de nets a imprimir. 0 = imprimir todo")
-    parser.add_argument("--verbose", action="store_true", help="Imprime salida detallada pin por pin y net por net")
+    parser.add_argument("--external-line-test", action="store_true", help="Prueba líneas UUT <-> Raspberry definidas en el netlist como PI.GPIOxx")
+    parser.add_argument("--external-bidir", action="store_true", help="En external-line-test, prueba ambas direcciones en todas las líneas")
+    parser.add_argument("--pi-chip", default="0", help="GPIO chip de la Raspberry para gpiod. Normalmente 0")
     args = parser.parse_args()
-
-    global VERBOSE
-    VERBOSE = args.verbose
 
     if not os.path.exists(args.bsdl):
         print("No existe el archivo BSDL:", args.bsdl)
@@ -920,18 +1208,15 @@ def main():
         pins = info["pins"]
         tap = f"{chipname}.cpu"
 
-        print("\n=================================")
-        print("JTAG UNIVERSAL TEST STATION")
-        print("=================================")
-        print(f"BSDL: {chipname}")
-        print(f"Boundary: {bits} bits")
-        print(f"IR: {irlen} bits")
-        print(f"Pines controlables: {len(pins)}")
-        if VERBOSE:
-            print("TAP:", tap)
-            print("EXTEST:", extest)
-            print("SAMPLE:", sample_opcode)
-            print("IDCODE:", idcode)
+        print("\n=== INFO DEL BSDL ===")
+        print("Chip:", chipname)
+        print("TAP:", tap)
+        print("IR Length:", irlen)
+        print("Boundary Length:", bits)
+        print("EXTEST:", extest)
+        print("SAMPLE:", sample_opcode)
+        print("IDCODE:", idcode)
+        print("Pines controlables encontrados:", len(pins))
 
         nets = None
         board_map = None
@@ -965,26 +1250,16 @@ def main():
         proc, sock = start_openocd(cfg_path)
         recv_all(sock)
 
-        if VERBOSE:
-            print("\n=== SCAN CHAIN ===")
-            print(cmd(sock, "scan_chain"))
-        else:
-            cmd(sock, "scan_chain")
+        print("\n=== SCAN CHAIN ===")
+        print(cmd(sock, "scan_chain"))
 
         print("Leyendo IDCODE...")
         cmd(sock, f"irscan {tap} {idcode}")
-        id_out = cmd(sock, f"drscan {tap} 32 0")
-        if VERBOSE:
-            print(id_out)
-        else:
-            id_val = extract_hex(id_out)
-            print(f"IDCODE: 0x{id_val:x}" if id_val is not None else "IDCODE: no leído")
+        print(cmd(sock, f"drscan {tap} 32 0"))
 
-        if VERBOSE:
-            print("Lectura base SAMPLE...")
+        print("Lectura base SAMPLE...")
         base = sample(sock, tap, sample_opcode, bits)
-        if VERBOSE:
-            print(f"BASE = 0x{base:x}")
+        print(f"BASE = 0x{base:x}")
 
         short_results = None
         if not args.no_short_test:
@@ -994,9 +1269,15 @@ def main():
         if args.netlist and args.netlist_test:
             net_report = run_netlist_test(sock, tap, extest, sample_opcode, bits, pins, board_map)
 
+        external_report = None
+        if args.netlist and args.external_line_test:
+            external_tests = build_external_line_tests(nets, pins, uut_ref, external_bidir=args.external_bidir)
+            external_report = run_external_line_tests(sock, tap, extest, sample_opcode, bits, pins, external_tests, pi_chip=args.pi_chip)
+
         extest_write(sock, tap, extest, bits, 0)
 
         print_test_summary(short_results, net_report)
+        print_external_line_summary(external_report)
 
         save_reports(
             args.out,
@@ -1006,6 +1287,7 @@ def main():
             net_report=net_report,
             short_results=short_results,
             unknown_uut_pins=unknown_uut_pins,
+            external_report=external_report,
         )
 
     except Exception as e:
@@ -1025,8 +1307,7 @@ def main():
                 pass
 
         if proc:
-            if VERBOSE:
-                print("\nCerrando OpenOCD...")
+            print("\nCerrando OpenOCD...")
             try:
                 proc.terminate()
                 proc.wait(timeout=5)

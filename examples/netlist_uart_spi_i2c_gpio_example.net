@@ -1,0 +1,42 @@
+# Ejemplo de netlist para probar líneas del ATmega hacia Raspberry Pi
+# El programa detecta automáticamente RX/TX/SPI/I2C/GPIO si hay PI.GPIOxx.
+
+NET_UART0_TX
+  U1.PE1
+  PI.GPIO15
+
+NET_UART0_RX
+  U1.PE0
+  PI.GPIO14
+
+NET_SPI_MOSI
+  U1.PB2
+  PI.GPIO10
+
+NET_SPI_MISO
+  U1.PB3
+  PI.GPIO9
+
+NET_SPI_SCK
+  U1.PB1
+  PI.GPIO11
+
+NET_SPI_CS
+  U1.PB0
+  PI.GPIO8
+
+NET_I2C_SCL
+  U1.PD0
+  PI.GPIO3
+
+NET_I2C_SDA
+  U1.PD1
+  PI.GPIO2
+
+NET_GPIO_TEST_1
+  U1.PH3
+  PI.GPIO21
+
+NET_GPIO_TEST_2
+  U1.PK4
+  PI.GPIO20
