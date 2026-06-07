@@ -18,6 +18,9 @@ JTAG_TDI = 10
 JTAG_TDO = 9
 JTAG_SPEED = 10
 
+# Salida corta por defecto. Usa --verbose para ver cada pin/net y salida completa de OpenOCD.
+VERBOSE = False
+
 # Cambia esto si tu netlist usa otro nombre para el micro.
 # Ejemplos: U1, IC1, ATMEGA2560, MEGA2560
 DEFAULT_UUT_REFS = ["U1", "IC1", "ATMEGA2560", "MEGA2560", "ATMEGA", "ARDUINO"]
@@ -438,29 +441,33 @@ def describe_connections(conns):
 
 
 def print_test_summary(short_report=None, net_report=None):
-    print("\n=== RESUMEN COMO SE DEBE ===")
+    print("\n=================================")
+    print("RESULTADO")
+    print("=================================")
 
     if short_report is not None:
         counts = defaultdict(int)
         for row in short_report:
             counts[row["status"]] += 1
 
-        print("\nCortos / conexiones detectadas:")
-        print(f"  OK sin seguidores extra: {counts['OK_SIN_CORTO']}")
-        print(f"  OK porque el netlist permite la conexión: {counts['OK_SEGUN_NETLIST']}")
-        print(f"  CORTO SOSPECHOSO no permitido por netlist: {counts['CORTO_SOSPECHOSO']}")
+        total = len(short_report)
+        print(f"Pines revisados: {total}")
+        print(f"OK sin corto: {counts['OK_SIN_CORTO']}")
+        print(f"OK segun netlist: {counts['OK_SEGUN_NETLIST']}")
+        print(f"Cortos sospechosos: {counts['CORTO_SOSPECHOSO']}")
 
         bad = [r for r in short_report if r["status"] == "CORTO_SOSPECHOSO"]
         if bad:
-            print("\nCortos sospechosos reales:")
+            print("\nERRORES DETECTADOS")
             for r in bad:
-                print(f"  {r['driver']} -> {', '.join(r['unexpected_followers'])}")
-                if r.get("driver_nets"):
-                    print(f"     Netlist del pin {r['driver']}: {', '.join(r['driver_nets'])}")
-                for p, nets in r.get("unexpected_follower_nets", {}).items():
-                    print(f"     {p} aparece en netlist como: {', '.join(nets) if nets else 'SIN_NET'}")
+                print(f"- CORTO: {r['driver']} -> {', '.join(r['unexpected_followers'])}")
+                if VERBOSE:
+                    if r.get("driver_nets"):
+                        print(f"    Netlist de {r['driver']}: {', '.join(r['driver_nets'])}")
+                    for p, nets in r.get("unexpected_follower_nets", {}).items():
+                        print(f"    {p}: {', '.join(nets) if nets else 'SIN_NET'}")
         else:
-            print("  No hay cortos sospechosos fuera del netlist.")
+            print("No hay cortos sospechosos fuera del netlist.")
 
     if net_report is not None:
         counts = defaultdict(int)
@@ -468,20 +475,23 @@ def print_test_summary(short_report=None, net_report=None):
             counts[r["status"]] += 1
 
         print("\nRevisión contra netlist:")
-        for key in ["OK", "OPEN_POSIBLE", "BRIDGE_POSIBLE", "MIXTO", "NO_MEDIBLE_DIRECTO"]:
-            print(f"  {key}: {counts[key]}")
+        print(f"OK: {counts['OK']}")
+        print(f"OPEN posible: {counts['OPEN_POSIBLE']}")
+        print(f"BRIDGE posible: {counts['BRIDGE_POSIBLE']}")
+        print(f"Mixto: {counts['MIXTO']}")
+        print(f"No medible directo: {counts['NO_MEDIBLE_DIRECTO']}")
 
         problems = [r for r in net_report if r["status"] in ["OPEN_POSIBLE", "BRIDGE_POSIBLE", "MIXTO"]]
         if problems:
             print("\nProblemas por NET:")
             for r in problems:
-                print(f"  {r['net']} desde {r['driver']} -> {r['status']}")
+                print(f"- {r['net']} desde {r['driver']} -> {r['status']}")
                 if r.get("missing"):
-                    print(f"     Faltan: {', '.join(r['missing'])}")
+                    print(f"    Faltan: {', '.join(r['missing'])}")
                 if r.get("extra"):
-                    print(f"     Extras/no permitidos: {', '.join(r['extra'])}")
+                    print(f"    Extras/no permitidos: {', '.join(r['extra'])}")
         else:
-            print("  No hay fallos medibles contra el netlist.")
+            print("No hay fallos medibles contra el netlist.")
 
 
 # ---------------- OpenOCD/JTAG ----------------
@@ -545,13 +555,16 @@ def extract_hex(output):
 
 
 def start_openocd(cfg_path):
-    print("Iniciando OpenOCD...")
-    proc = subprocess.Popen(["openocd", "-f", cfg_path])
+    print("JTAG: iniciando OpenOCD...")
+    if VERBOSE:
+        proc = subprocess.Popen(["openocd", "-f", cfg_path])
+    else:
+        proc = subprocess.Popen(["openocd", "-f", cfg_path], stdout=subprocess.DEVNULL, stderr=subprocess.STDOUT)
     end = time.time() + 10
     while time.time() < end:
         try:
             sock = socket.create_connection((HOST, PORT), timeout=1)
-            print("OpenOCD abierto y conectado.")
+            print("JTAG: OpenOCD conectado")
             return proc, sock
         except OSError:
             time.sleep(0.3)
@@ -644,15 +657,21 @@ def test_one_pin(sock, tap, extest, sample_opcode, bits, pins, pin):
 
 
 def run_short_test(sock, tap, extest, sample_opcode, bits, pins, board_map=None):
-    print("\n=== PRUEBA DE CORTOS VALIDADA CON NETLIST ===")
-    print("Si un pin sigue al otro, primero reviso si el netlist dice que esa conexión es correcta.")
-    print("Sólo marco CORTO si la conexión NO aparece permitida en el netlist.\n")
-
+    print("\nRevisando cortos...")
     pin_to_nets, same_net_pins = build_pin_net_lookup(board_map)
     results = []
+    total = len(pins)
+    last_pct = -1
 
-    for pin in pins:
-        print(f"Probando {pin}...")
+    for i, pin in enumerate(pins, start=1):
+        if VERBOSE:
+            print(f"Probando {pin}...")
+        else:
+            pct = int(i * 100 / total) if total else 100
+            if pct >= last_pct + 10 or pct == 100:
+                print(f"  {pct}%")
+                last_pct = pct
+
         r = test_one_pin(sock, tap, extest, sample_opcode, bits, pins, pin)
         followers = set(r["followers"])
         allowed = set(same_net_pins.get(pin, set()))
@@ -662,15 +681,18 @@ def run_short_test(sock, tap, extest, sample_opcode, bits, pins, board_map=None)
 
         if unexpected_followers:
             status = "CORTO_SOSPECHOSO"
-            print(f"  [CORTO?] seguidores NO permitidos por netlist: {unexpected_followers}")
-            if expected_followers:
-                print(f"  [OK NETLIST] seguidores permitidos: {expected_followers}")
+            if VERBOSE:
+                print(f"  [CORTO?] no permitido por netlist: {unexpected_followers}")
+                if expected_followers:
+                    print(f"  [OK NETLIST] permitido: {expected_followers}")
         elif expected_followers:
             status = "OK_SEGUN_NETLIST"
-            print(f"  [OK NETLIST] conexión esperada detectada: {expected_followers}")
+            if VERBOSE:
+                print(f"  [OK NETLIST] conexión esperada: {expected_followers}")
         else:
             status = "OK_SIN_CORTO"
-            print("  [OK] no siguió ningún pin extra")
+            if VERBOSE:
+                print("  [OK]")
 
         results.append({
             "driver": pin,
@@ -686,21 +708,22 @@ def run_short_test(sock, tap, extest, sample_opcode, bits, pins, board_map=None)
             "raw": r,
         })
 
+    print("Revisión de cortos completada")
     return results
 
 
 def run_netlist_test(sock, tap, extest, sample_opcode, bits, pins, board_map):
-    print("\n=== PRUEBA SEGÚN NETLIST ===")
-    print("Sólo puedo verificar conexiones donde ambos extremos son pines Boundary Scan del mismo chip.")
-    print("Si el otro extremo es resistencia, conector, memoria sin JTAG, etc., queda en el mapa pero no se puede leer directo.\n")
-
+    print("\nRevisando conexiones del netlist...")
     report = []
+    measurable_items = [x for x in board_map if x.get("expected_same_chip_pins")]
+    total = len(measurable_items)
+    done = 0
+    last_pct = -1
 
     for item in board_map:
         driver = item["driver"]
         expected = set(item["expected_same_chip_pins"])
 
-        # Si la net no tiene otro pin JTAG del mismo chip, no se puede verificar continuidad directa.
         if not expected:
             report.append({
                 "net": item["net"],
@@ -714,7 +737,15 @@ def run_netlist_test(sock, tap, extest, sample_opcode, bits, pins, board_map):
             })
             continue
 
-        print(f"Probando net {item['net']} desde {driver}...")
+        done += 1
+        if VERBOSE:
+            print(f"Probando net {item['net']} desde {driver}...")
+        else:
+            pct = int(done * 100 / total) if total else 100
+            if pct >= last_pct + 10 or pct == 100:
+                print(f"  {pct}%")
+                last_pct = pct
+
         r = test_one_pin(sock, tap, extest, sample_opcode, bits, pins, driver)
         observed = set(r["followers"])
 
@@ -723,16 +754,20 @@ def run_netlist_test(sock, tap, extest, sample_opcode, bits, pins, board_map):
 
         if not missing and not extra:
             status = "OK"
-            print("  [OK] conexiones esperadas detectadas")
+            if VERBOSE:
+                print("  [OK]")
         elif missing and not extra:
             status = "OPEN_POSIBLE"
-            print(f"  [OPEN?] no respondieron: {missing}")
+            if VERBOSE:
+                print(f"  [OPEN?] no respondieron: {missing}")
         elif extra and not missing:
             status = "BRIDGE_POSIBLE"
-            print(f"  [BRIDGE?] respondieron pines no esperados: {extra}")
+            if VERBOSE:
+                print(f"  [BRIDGE?] pines no esperados: {extra}")
         else:
             status = "MIXTO"
-            print(f"  [MIXTO] faltan {missing}, extras {extra}")
+            if VERBOSE:
+                print(f"  [MIXTO] faltan {missing}, extras {extra}")
 
         report.append({
             "net": item["net"],
@@ -745,6 +780,7 @@ def run_netlist_test(sock, tap, extest, sample_opcode, bits, pins, board_map):
             "connections": item["all_connections"],
         })
 
+    print("Revisión del netlist completada")
     return report
 
 
@@ -857,7 +893,11 @@ def main():
     parser.add_argument("--print-netlist", action="store_true", help="Imprime todas las nets y conexiones leídas del netlist")
     parser.add_argument("--print-board-map", action="store_true", help="Imprime cómo se mapeó el netlist contra los pines del BSDL")
     parser.add_argument("--print-limit", type=int, default=0, help="Límite de nets a imprimir. 0 = imprimir todo")
+    parser.add_argument("--verbose", action="store_true", help="Imprime salida detallada pin por pin y net por net")
     args = parser.parse_args()
+
+    global VERBOSE
+    VERBOSE = args.verbose
 
     if not os.path.exists(args.bsdl):
         print("No existe el archivo BSDL:", args.bsdl)
@@ -880,15 +920,18 @@ def main():
         pins = info["pins"]
         tap = f"{chipname}.cpu"
 
-        print("\n=== INFO DEL BSDL ===")
-        print("Chip:", chipname)
-        print("TAP:", tap)
-        print("IR Length:", irlen)
-        print("Boundary Length:", bits)
-        print("EXTEST:", extest)
-        print("SAMPLE:", sample_opcode)
-        print("IDCODE:", idcode)
-        print("Pines controlables encontrados:", len(pins))
+        print("\n=================================")
+        print("JTAG UNIVERSAL TEST STATION")
+        print("=================================")
+        print(f"BSDL: {chipname}")
+        print(f"Boundary: {bits} bits")
+        print(f"IR: {irlen} bits")
+        print(f"Pines controlables: {len(pins)}")
+        if VERBOSE:
+            print("TAP:", tap)
+            print("EXTEST:", extest)
+            print("SAMPLE:", sample_opcode)
+            print("IDCODE:", idcode)
 
         nets = None
         board_map = None
@@ -922,16 +965,26 @@ def main():
         proc, sock = start_openocd(cfg_path)
         recv_all(sock)
 
-        print("\n=== SCAN CHAIN ===")
-        print(cmd(sock, "scan_chain"))
+        if VERBOSE:
+            print("\n=== SCAN CHAIN ===")
+            print(cmd(sock, "scan_chain"))
+        else:
+            cmd(sock, "scan_chain")
 
         print("Leyendo IDCODE...")
         cmd(sock, f"irscan {tap} {idcode}")
-        print(cmd(sock, f"drscan {tap} 32 0"))
+        id_out = cmd(sock, f"drscan {tap} 32 0")
+        if VERBOSE:
+            print(id_out)
+        else:
+            id_val = extract_hex(id_out)
+            print(f"IDCODE: 0x{id_val:x}" if id_val is not None else "IDCODE: no leído")
 
-        print("Lectura base SAMPLE...")
+        if VERBOSE:
+            print("Lectura base SAMPLE...")
         base = sample(sock, tap, sample_opcode, bits)
-        print(f"BASE = 0x{base:x}")
+        if VERBOSE:
+            print(f"BASE = 0x{base:x}")
 
         short_results = None
         if not args.no_short_test:
@@ -972,7 +1025,8 @@ def main():
                 pass
 
         if proc:
-            print("\nCerrando OpenOCD...")
+            if VERBOSE:
+                print("\nCerrando OpenOCD...")
             try:
                 proc.terminate()
                 proc.wait(timeout=5)

@@ -86,3 +86,13 @@ El backend ejecuta:
 ```bash
 sudo python3 -u mega_jtag_bsdl_netlist_test.py archivo.bsdl archivo.net --uut-ref U1 --netlist-test
 ```
+
+## Salida de consola
+
+La revisión ahora usa salida corta por defecto: muestra inicio, progreso, resumen y errores importantes.
+
+Para ver cada pin y cada net con detalle:
+
+```bash
+sudo python3 backend/mega_jtag_bsdl_netlist_test.py archivo.bsdl placa.net --uut-ref U1 --netlist-test --verbose
+```
