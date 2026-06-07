@@ -9,6 +9,7 @@ function getDefaultApiUrl() {
 function App() {
   const [apiUrl, setApiUrl] = useState(getDefaultApiUrl());
   const [file, setFile] = useState(null);
+  const [netlistFile, setNetlistFile] = useState(null);
   const [running, setRunning] = useState(false);
   const [output, setOutput] = useState("");
   const [error, setError] = useState("");
@@ -45,9 +46,10 @@ function App() {
 
     const formData = new FormData();
     formData.append("bsdl", file);
+    if (netlistFile) formData.append("netlist", netlistFile);
 
     try {
-      appendOutput("Subiendo archivo BSDL a la Raspberry...\n");
+      appendOutput(netlistFile ? "Subiendo archivo BSDL y Netlist a la Raspberry...\n" : "Subiendo archivo BSDL a la Raspberry...\n");
 
       const res = await fetch(`${apiUrl}/api/start`, {
         method: "POST",
@@ -130,6 +132,17 @@ function App() {
               disabled={running}
             />
             <span>{file ? file.name : "Ningun archivo seleccionado"}</span>
+          </div>
+
+          <label>Archivo Netlist opcional</label>
+          <div className="fileBox">
+            <input
+              type="file"
+              accept=".net,.cir,.csv,.txt,.xml"
+              onChange={(e) => setNetlistFile(e.target.files?.[0] || null)}
+              disabled={running}
+            />
+            <span>{netlistFile ? netlistFile.name : "Sin netlist: revision general"}</span>
           </div>
 
           <button className="primary" onClick={startTest} disabled={running || !file}>

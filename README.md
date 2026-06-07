@@ -69,3 +69,20 @@ Si cambias el cableado, modifica estos valores en:
 ```text
 backend/mega_jtag_bsdl_test.py
 ```
+
+## Netlist en la web
+
+Esta version permite subir tambien un archivo Netlist opcional desde la interfaz web.
+
+- Si subes solo BSDL: hace revision general de cortos.
+- Si subes BSDL + Netlist: compara los cortos detectados contra el netlist y separa:
+  - OK_SEGUN_NETLIST
+  - CORTO_SOSPECHOSO
+  - NO_MEDIBLE_DIRECTO
+  - OPEN_POSIBLE / BRIDGE_POSIBLE / MIXTO cuando se puede medir directo.
+
+El backend ejecuta:
+
+```bash
+sudo python3 -u mega_jtag_bsdl_netlist_test.py archivo.bsdl archivo.net --uut-ref U1 --netlist-test
+```

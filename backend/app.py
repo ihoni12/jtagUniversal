@@ -10,20 +10,28 @@ import time
 app = Flask(__name__)
 CORS(app)
 
-UPLOAD_DIR = "uploads"
+UPLOAD_DIR = os.path.abspath("uploads")
 os.makedirs(UPLOAD_DIR, exist_ok=True)
 
 jobs = {}
 
 
-def run_jtag_job(job_id, bsdl_path):
+def run_jtag_job(job_id, bsdl_path, netlist_path=None):
     q = jobs[job_id]["queue"]
     jobs[job_id]["status"] = "running"
     q.put("Iniciando revision JTAG...\n")
+    if netlist_path:
+        q.put("Archivo netlist recibido. La revision validara cortos contra el netlist.\n")
+    else:
+        q.put("Sin netlist: se ejecuta revision general de cortos.\n")
 
     try:
+        cmd = ["sudo", "python3", "-u", "mega_jtag_bsdl_netlist_test.py", bsdl_path]
+        if netlist_path:
+            cmd += [netlist_path, "--uut-ref", "U1", "--netlist-test"]
+
         proc = subprocess.Popen(
-            ["sudo", "python3", "-u", "mega_jtag_bsdl_test.py", bsdl_path],
+            cmd,
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
             text=True,
@@ -54,11 +62,18 @@ def start_test():
 
     file = request.files["bsdl"]
     if not file.filename:
-        return jsonify({"ok": False, "error": "Archivo vacio"}), 400
+        return jsonify({"ok": False, "error": "Archivo BSDL vacio"}), 400
 
     filename = f"{uuid.uuid4()}.bsdl"
     bsdl_path = os.path.abspath(os.path.join(UPLOAD_DIR, filename))
     file.save(bsdl_path)
+
+    netlist_path = None
+    netlist_file = request.files.get("netlist")
+    if netlist_file and netlist_file.filename:
+        net_filename = f"{uuid.uuid4()}.net"
+        netlist_path = os.path.abspath(os.path.join(UPLOAD_DIR, net_filename))
+        netlist_file.save(netlist_path)
 
     job_id = str(uuid.uuid4())
     jobs[job_id] = {
@@ -67,9 +82,10 @@ def start_test():
         "created_at": time.time(),
         "proc": None,
         "filename": file.filename,
+        "netlist_filename": netlist_file.filename if netlist_file and netlist_file.filename else None,
     }
 
-    t = threading.Thread(target=run_jtag_job, args=(job_id, bsdl_path), daemon=True)
+    t = threading.Thread(target=run_jtag_job, args=(job_id, bsdl_path, netlist_path), daemon=True)
     t.start()
 
     return jsonify({"ok": True, "job_id": job_id})
