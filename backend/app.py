@@ -1,101 +1,145 @@
 from flask import Flask, request, jsonify, Response
 from flask_cors import CORS
-import subprocess
-import os
-import uuid
-import threading
-import queue
-import time
+import subprocess, os, uuid, threading, queue, time, sys, json, signal
 
 app = Flask(__name__)
 CORS(app)
 
-UPLOAD_DIR = os.path.abspath("uploads")
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+UPLOAD_DIR = os.path.join(BASE_DIR, "uploads")
+REPORT_DIR = os.path.join(BASE_DIR, "jtag_reports")
 os.makedirs(UPLOAD_DIR, exist_ok=True)
+os.makedirs(REPORT_DIR, exist_ok=True)
 
 jobs = {}
 
+def as_bool(value, default=False):
+    if value is None:
+        return default
+    return str(value).lower() in ["1", "true", "yes", "on"]
 
-def run_jtag_job(job_id, bsdl_path, netlist_path=None):
+def put(q, text):
+    q.put(str(text))
+
+def run_jtag_job(job_id, bsdl_path, netlist_path=None, options=None):
+    options = options or {}
     q = jobs[job_id]["queue"]
     jobs[job_id]["status"] = "running"
-    q.put("Iniciando revision JTAG...\n")
-    if netlist_path:
-        q.put("Archivo netlist recibido. La revision validara cortos contra el netlist.\n")
-    else:
-        q.put("Sin netlist: se ejecuta revision general de cortos.\n")
+
+    test_shorts = options.get("test_shorts", True)
+    test_netlist = options.get("test_netlist", False)
+    test_external = options.get("test_external", False)
+    external_bidir = options.get("external_bidir", False)
+    uut_ref = options.get("uut_ref") or "U1"
+
+    put(q, "=================================\n")
+    put(q, "JTAG UNIVERSAL TEST STATION\n")
+    put(q, "=================================\n")
+    put(q, "BSDL cargado OK\n")
+    put(q, "Netlist: " + ("SI\n" if netlist_path else "NO\n"))
+    put(q, "Prueba cortos: " + ("SI\n" if test_shorts else "NO\n"))
+    put(q, "Validar netlist: " + ("SI\n" if test_netlist else "NO\n"))
+    put(q, "Lineas externas Pi TX/RX/SPI/I2C/GPIO: " + ("SI\n" if test_external else "NO\n"))
+    put(q, "\n")
+
+    if (test_netlist or test_external) and not netlist_path:
+        put(q, "ERROR: seleccionaste una prueba que necesita netlist, pero no subiste netlist.\n")
+        jobs[job_id]["status"] = "error"
+        put(q, "__DONE__")
+        return
 
     try:
-        cmd = ["sudo", "python3", "-u", "mega_jtag_bsdl_netlist_test.py", bsdl_path]
+        cmd = [sys.executable, "-u", "jtag_tester_core.py", bsdl_path, "--out", REPORT_DIR]
         if netlist_path:
-            cmd += [netlist_path, "--uut-ref", "U1", "--netlist-test"]
+            cmd.insert(4, netlist_path)  # after bsdl path
+            cmd += ["--uut-ref", uut_ref]
+        if not test_shorts:
+            cmd.append("--no-short-test")
+        if test_netlist:
+            cmd.append("--netlist-test")
+        if test_external:
+            cmd.append("--external-line-test")
+        if external_bidir:
+            cmd.append("--external-bidir")
 
+        put(q, "Comando interno:\n")
+        put(q, " ".join(cmd).replace(bsdl_path, "BSDL_SUBIDO").replace(netlist_path or "__NO_NET__", "NETLIST_SUBIDO") + "\n\n")
+
+        # Si el backend fue iniciado con sudo, esto queda con permisos para OpenOCD/GPIO.
+        # Si no, el usuario debe iniciar start_backend.sh con sudo.
         proc = subprocess.Popen(
             cmd,
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
             text=True,
             bufsize=1,
-            cwd=os.path.dirname(os.path.abspath(__file__)),
+            cwd=BASE_DIR,
         )
-
         jobs[job_id]["proc"] = proc
 
         for line in proc.stdout:
-            q.put(line)
-
+            put(q, line)
         proc.wait()
-        q.put(f"\nProceso terminado con codigo: {proc.returncode}\n")
-        jobs[job_id]["status"] = "done" if proc.returncode == 0 else "error"
-        q.put("__DONE__")
 
+        # Intentar agregar resumen JSON simple al final, si existe.
+        external_json = os.path.join(REPORT_DIR, "external_line_test_report.json")
+        if os.path.exists(external_json):
+            try:
+                with open(external_json, "r") as f:
+                    data = json.load(f)
+                put(q, "\n=================================\n")
+                put(q, "RESUMEN SIMPLE LINEAS EXTERNAS\n")
+                put(q, "=================================\n")
+                if not data:
+                    put(q, "No se encontraron lineas UUT <-> PI.GPIO en el netlist.\n")
+                else:
+                    for r in data:
+                        put(q, f"{r.get('net')} | UUT {r.get('uut_pin')} <-> PI.GPIO{r.get('pi_gpio')} | {r.get('direction')} | {r.get('status')}\n")
+            except Exception:
+                pass
+
+        put(q, f"\nProceso terminado con codigo: {proc.returncode}\n")
+        jobs[job_id]["status"] = "done" if proc.returncode == 0 else "error"
+        put(q, "__DONE__")
     except Exception as e:
         jobs[job_id]["status"] = "error"
-        q.put(f"\nERROR: {e}\n")
-        q.put("__DONE__")
-
+        put(q, f"\nERROR: {e}\n")
+        put(q, "__DONE__")
 
 @app.route("/api/start", methods=["POST"])
 def start_test():
     if "bsdl" not in request.files:
         return jsonify({"ok": False, "error": "No recibi archivo BSDL"}), 400
-
-    file = request.files["bsdl"]
-    if not file.filename:
+    bsdl_file = request.files["bsdl"]
+    if not bsdl_file.filename:
         return jsonify({"ok": False, "error": "Archivo BSDL vacio"}), 400
 
-    filename = f"{uuid.uuid4()}.bsdl"
-    bsdl_path = os.path.abspath(os.path.join(UPLOAD_DIR, filename))
-    file.save(bsdl_path)
+    bsdl_path = os.path.join(UPLOAD_DIR, f"{uuid.uuid4()}_{bsdl_file.filename}")
+    bsdl_file.save(bsdl_path)
 
     netlist_path = None
     netlist_file = request.files.get("netlist")
     if netlist_file and netlist_file.filename:
-        net_filename = f"{uuid.uuid4()}.net"
-        netlist_path = os.path.abspath(os.path.join(UPLOAD_DIR, net_filename))
+        netlist_path = os.path.join(UPLOAD_DIR, f"{uuid.uuid4()}_{netlist_file.filename}")
         netlist_file.save(netlist_path)
 
-    job_id = str(uuid.uuid4())
-    jobs[job_id] = {
-        "queue": queue.Queue(),
-        "status": "created",
-        "created_at": time.time(),
-        "proc": None,
-        "filename": file.filename,
-        "netlist_filename": netlist_file.filename if netlist_file and netlist_file.filename else None,
+    options = {
+        "test_shorts": as_bool(request.form.get("test_shorts"), True),
+        "test_netlist": as_bool(request.form.get("test_netlist"), False),
+        "test_external": as_bool(request.form.get("test_external"), False),
+        "external_bidir": as_bool(request.form.get("external_bidir"), False),
+        "uut_ref": request.form.get("uut_ref") or "U1",
     }
 
-    t = threading.Thread(target=run_jtag_job, args=(job_id, bsdl_path, netlist_path), daemon=True)
-    t.start()
-
+    job_id = str(uuid.uuid4())
+    jobs[job_id] = {"queue": queue.Queue(), "status": "created", "created_at": time.time(), "proc": None}
+    threading.Thread(target=run_jtag_job, args=(job_id, bsdl_path, netlist_path, options), daemon=True).start()
     return jsonify({"ok": True, "job_id": job_id})
-
 
 @app.route("/api/progress/<job_id>")
 def progress(job_id):
     if job_id not in jobs:
         return "Job no existe", 404
-
     def stream():
         q = jobs[job_id]["queue"]
         while True:
@@ -105,14 +149,23 @@ def progress(job_id):
                 break
             msg = msg.replace("\r", "").replace("\n", "\\n")
             yield f"data: {msg}\n\n"
-
     return Response(stream(), mimetype="text/event-stream")
 
+@app.route("/api/stop/<job_id>", methods=["POST"])
+def stop_job(job_id):
+    job = jobs.get(job_id)
+    if not job or not job.get("proc"):
+        return jsonify({"ok": False, "error": "No hay proceso activo"}), 404
+    try:
+        job["proc"].terminate()
+        job["status"] = "stopped"
+        return jsonify({"ok": True})
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 500
 
 @app.route("/api/ping")
 def ping():
     return jsonify({"ok": True, "message": "Servidor JTAG activo"})
-
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=5000, threaded=True)
