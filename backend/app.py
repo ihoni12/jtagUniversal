@@ -258,6 +258,20 @@ def analyze_files(bsdl_path, netlist_path=None, uut_ref="U1"):
         pin_nets.setdefault(driver, []).append(item.get("net"))
         pin_connections.setdefault(driver, []).extend(item.get("all_connections", []))
 
+    # Texto corto sacado del BSDL para mostrarlo al lado del pin en la barra lateral.
+    bsdl_pin_text = {}
+    for _bit, _cell in (info.get("cells") or {}).items():
+        _port = str(_cell.get("port") or "").upper()
+        if not _port or _port == "*":
+            continue
+        _func = str(_cell.get("function") or "").lower()
+        if _func in ["bidir", "output3", "output2", "output", "input", "observe_only"]:
+            prev = bsdl_pin_text.get(_port)
+            label = f"{_func} · bit {_bit}"
+            # Preferir bidir/output sobre input si hay varias celdas.
+            if not prev or _func in ["bidir", "output3", "output2", "output"]:
+                bsdl_pin_text[_port] = label
+
     pin_rows = []
     for name in sorted(pins.keys()):
         data = pins[name]
@@ -270,6 +284,7 @@ def analyze_files(bsdl_path, netlist_path=None, uut_ref="U1"):
             "input_bit": data.get("input_bit"),
             "output_bit": data.get("output_bit"),
             "control_bit": data.get("control_bit"),
+            "bsdl_text": bsdl_pin_text.get(name) or f"OUT {data.get('output_bit')} · IN {data.get('input_bit')}",
             "nets": nets_for_pin,
             "connections": pin_connections.get(name, []),
             "functions": funcs,

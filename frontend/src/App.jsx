@@ -60,6 +60,113 @@ function cleanConsoleForUser(text) {
   ].join("\n");
 }
 
+
+function statusClass(status) {
+  const s = String(status || "").toUpperCase();
+  if (s.includes("PASS") || s === "OK") return "pass";
+  if (s.includes("FAIL") || s.includes("STUCK") || s.includes("CORTO")) return "fail";
+  if (s.includes("ERROR")) return "error";
+  return "idle";
+}
+
+function parseFinalReport(text) {
+  const lines = text.split("\n").map((x) => x.trim()).filter(Boolean);
+  const getValue = (prefix) => {
+    const row = lines.find((l) => l.toLowerCase().startsWith(prefix.toLowerCase()));
+    return row ? row.split(":").slice(1).join(":").trim() : "";
+  };
+  const status = getValue("Estado") || "Sin resultado";
+  const reviewType = getValue("Tipo de revisión") || "Revisión";
+  const chip = getValue("Placa / chip") || "No detectado";
+  const pinsAvailable = getValue("Pines disponibles en el BSDL");
+  const pinsUsed = getValue("Pines usados en esta prueba");
+  const pass = getValue("PASS") || "0";
+  const fail = getValue("FAIL") || "0";
+  const error = getValue("ERROR") || "0";
+
+  const tests = [];
+  const testStart = lines.indexOf("Revisiones realizadas:");
+  if (testStart >= 0) {
+    for (let i = testStart + 1; i < lines.length; i++) {
+      if (!lines[i].startsWith("✓")) break;
+      tests.push(lines[i].replace(/^✓\s*/, ""));
+    }
+  }
+
+  const rows = [];
+  for (let i = 0; i < lines.length; i++) {
+    const m = lines[i].match(/^-\s*([^:]+):\s*(PASS|FAIL|ERROR)\s*(?:\((.*)\))?$/i);
+    if (!m) continue;
+    const row = { pin: m[1].trim(), status: m[2].toUpperCase(), extra: m[3] || "", revision: "", reason: "" };
+    for (let j = i + 1; j < Math.min(lines.length, i + 8); j++) {
+      if (lines[j].startsWith("- ")) break;
+      if (lines[j].startsWith("Revisión:")) row.revision = lines[j].replace("Revisión:", "").trim();
+      if (lines[j].startsWith("Motivo:")) row.reason = lines[j].replace("Motivo:", "").trim();
+    }
+    rows.push(row);
+  }
+
+  const connections = rows.filter((r) => /GPIO|UART|SPI|I2C|NET_/i.test(r.extra) && /GPIO|NET_/i.test(r.extra));
+  const pins = rows.filter((r) => !connections.includes(r));
+  return { status, reviewType, chip, pinsAvailable, pinsUsed, pass, fail, error, tests, pins, connections };
+}
+
+function ProgressView({ output, running }) {
+  const lines = output.split("\n").map((x) => x.trim()).filter(Boolean);
+  const visible = lines.filter((l) =>
+    /Empezó|Inici|Revisión|Revisando|\[\d+\/\d+\]|Stuck|Corto|Abierto|Conectividad|Resultado|PASS|FAIL|ERROR|Pin |UART|Conexión|Línea:/i.test(l)
+  ).filter((l) => !/^SCAN CHAIN:?$/i.test(l) && !/^IDCODE:?$/i.test(l)).slice(-45);
+
+  if (!output) return <div className="emptyResult">Esperando revisión...</div>;
+  return <div className="friendlyPanel livePanel">
+    <div className="friendlyHeader"><b>{running ? "Progreso de la revisión" : "Progreso guardado"}</b><span>{visible.length} eventos visibles</span></div>
+    <div className="progressList">
+      {visible.map((line, i) => <div key={i} className={`progressLine ${statusClass(line)}`}><span>{line}</span></div>)}
+    </div>
+  </div>;
+}
+
+function FinalResultView({ output }) {
+  const report = parseFinalReport(output);
+  const hasFinal = /RESULTADO FINAL|INFORME AVANZADO/i.test(output);
+  if (!hasFinal) return <ProgressView output={output} running={false} />;
+
+  return <div className="friendlyPanel finalReport">
+    <div className={`resultBanner ${statusClass(report.status)}`}>
+      <div><small>Resultado final</small><b>{report.status}</b></div>
+      <span>{report.reviewType}</span>
+    </div>
+
+    <div className="simpleInfoGrid">
+      <div><small>Placa / chip</small><b>{report.chip}</b></div>
+      <div><small>Pines del BSDL</small><b>{report.pinsAvailable || "-"}</b></div>
+      <div><small>Pines usados en esta prueba</small><b>{report.pinsUsed || "-"}</b></div>
+      <div><small>Resultados</small><b>PASS {report.pass} · FAIL {report.fail} · ERROR {report.error}</b></div>
+    </div>
+
+    {report.tests.length > 0 && <div className="testChips">
+      {report.tests.map((t) => <span key={t}>✓ {t}</span>)}
+    </div>}
+
+    <ResultTable title="Pines revisados" rows={report.pins} empty="No hay pines normales en este informe." />
+    <ResultTable title="Conexiones revisadas" rows={report.connections} empty="No hay conexiones TX/RX/SPI/I2C/GPIO en este informe." connection />
+  </div>;
+}
+
+function ResultTable({ title, rows, empty }) {
+  return <div className="resultTableBox">
+    <div className="tableTitle"><b>{title}</b><span>{rows.length}</span></div>
+    {rows.length === 0 ? <p className="emptyTable">{empty}</p> : <table className="resultTable"><thead><tr><th>Pin</th><th>Estado</th><th>Revisión</th><th>Detalle</th></tr></thead><tbody>
+      {rows.map((r, i) => <tr key={`${r.pin}-${i}`} className={statusClass(r.status)}>
+        <td><b>{r.pin}</b><small>{r.extra}</small></td>
+        <td><span className={`pill ${statusClass(r.status)}`}>{r.status}</span></td>
+        <td>{r.revision || "Revisión"}</td>
+        <td>{r.reason || (r.status === "PASS" ? "Sin errores detectados." : "Revisar este pin.")}</td>
+      </tr>)}
+    </tbody></table>}
+  </div>;
+}
+
 function App() {
   const [apiUrl] = useState(getDefaultApiUrl());
   const [file, setFile] = useState(null);
@@ -78,6 +185,7 @@ function App() {
   const [uploadOpen, setUploadOpen] = useState(true);
   const [pinFilter, setPinFilter] = useState("");
   const [selectedUartOther, setSelectedUartOther] = useState("");
+  const [showRawLog, setShowRawLog] = useState(false);
   const outputRef = useRef(null);
 
   const summary = useMemo(() => calculateResultCounts(output), [output]);
@@ -275,9 +383,8 @@ function App() {
             {filteredPins.map((p) => (
               <button key={p.name} className={`pinBtn ${selectedPin === p.name ? "active" : ""} ${p.special ? "specialPin" : ""}`} onClick={() => setSelectedPin(p.name)}>
                 <b>{p.name}</b>
-                {p.special && <em>{p.special.label}</em>}
-                {p.uart_pair && <em className="uartTag">{p.uart_pair.id}</em>}
-                <small>{(p.functions || []).slice(0, 1).join(" · ")}</small>
+                <span className="bsdlMini">{p.bsdl_text || (p.functions || []).slice(0, 1).join(" · ") || "BSDL"}</span>
+                <span className="pinTags">{p.special && <em>{p.special.label}</em>}{p.uart_pair && <em className="uartTag">{p.uart_pair.id}</em>}</span>
               </button>
             ))}
             {!board && <p className="mutedSide">No hay pines todavía.</p>}
@@ -332,8 +439,9 @@ function App() {
                 </div>}
               </div>
             </div>
-            <div className="terminalTop"><span></span><span></span><span></span><b>{running ? "Consola en vivo" : "Consola completa + informe final"}</b><button className="copyBtn" onClick={() => navigator.clipboard?.writeText(output || "")}>Copiar</button></div>
-            <pre className={`terminal ${done && !running ? "friendly" : ""}`} ref={outputRef}>{output || "Esperando revisión..."}</pre>
+            <div className="resultTop"><b>{running ? "Revisión en progreso" : done ? "Informe de revisión" : "Resultado"}</b><div><button className="copyBtn" onClick={() => navigator.clipboard?.writeText(output || "")}>Copiar todo</button><button className="copyBtn" onClick={() => setShowRawLog(!showRawLog)}>{showRawLog ? "Ocultar log" : "Ver log completo"}</button></div></div>
+            {running ? <ProgressView output={output} running={running} /> : <FinalResultView output={output} />}
+            {showRawLog && <pre className="terminal rawLog" ref={outputRef}>{output || "Sin log todavía."}</pre>}
           </section>
         </div>
       </main>
