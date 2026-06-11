@@ -1,0 +1,8 @@
+# UART Raspberry Pi
+NET_UART0_TX
+  U1.PE1
+  PI.GPIO15
+
+NET_UART0_RX
+  U1.PE0
+  PI.GPIO14

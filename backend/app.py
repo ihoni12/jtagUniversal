@@ -86,6 +86,87 @@ def save_uploaded_files(job_id, bsdl_file, netlist_file=None):
     return bsdl_path, netlist_path
 
 
+
+def uart_id_from_net(net_name):
+    """Devuelve UART0/UART1/etc si el net se llama NET_UART0_TX/RX."""
+    text = str(net_name or "").upper()
+    m = re.search(r"UART\s*([0-9]+)", text)
+    if m:
+        return f"UART{m.group(1)}"
+    if "UART" in text:
+        return "UART"
+    return None
+
+
+def uart_role_from_net_or_pin(net_name, pin_name=""):
+    text = f"{net_name or ''} {pin_name or ''}".upper()
+    if re.search(r"(^|[_\-])TX([_\-]|$)", text) or text.endswith("TX"):
+        return "TX"
+    if re.search(r"(^|[_\-])RX([_\-]|$)", text) or text.endswith("RX"):
+        return "RX"
+    return None
+
+
+def build_uart_pairs_from_board_map(board_map):
+    """Agrupa TX/RX por número de UART usando el netlist.
+
+    Ejemplo:
+      NET_UART0_TX -> U1.PE1 + PI.GPIO15
+      NET_UART0_RX -> U1.PE0 + PI.GPIO14
+    crea una pareja UART0: TX PE1, RX PE0.
+    """
+    groups = {}
+    for item in board_map or []:
+        net = item.get("net", "")
+        uart_id = uart_id_from_net(net)
+        role = uart_role_from_net_or_pin(net, item.get("driver", ""))
+        if not uart_id or role not in ["TX", "RX"]:
+            continue
+        ext = None
+        for c in item.get("all_connections", []):
+            gpio = connection_pi_gpio_local(c)
+            if gpio is not None:
+                ext = gpio
+                break
+        g = groups.setdefault(uart_id, {"id": uart_id, "tx": None, "rx": None})
+        g[role.lower()] = {"pin": item.get("driver"), "net": net, "pi_gpio": ext}
+
+    pairs = []
+    for uart_id, g in sorted(groups.items()):
+        tx = g.get("tx")
+        rx = g.get("rx")
+        complete = bool(tx and rx)
+        pairs.append({
+            "id": uart_id,
+            "tx": tx,
+            "rx": rx,
+            "complete": complete,
+            "label": f"{uart_id}: TX {tx.get('pin') if tx else '?'} / RX {rx.get('pin') if rx else '?'}",
+            "note": "Completa" if complete else "Falta TX o RX en el netlist",
+        })
+    return pairs
+
+
+def annotate_uart_pairs_on_pins(pin_rows, uart_pairs):
+    by_pin = {p["name"]: p for p in pin_rows}
+    for pair in uart_pairs or []:
+        for role in ["tx", "rx"]:
+            side = pair.get(role)
+            if not side:
+                continue
+            pin = by_pin.get(side.get("pin"))
+            if not pin:
+                continue
+            pin["uart_pair"] = {
+                "id": pair["id"],
+                "role": role.upper(),
+                "other_pin": pair.get("rx" if role == "tx" else "tx", {}).get("pin") if pair.get("rx" if role == "tx" else "tx") else None,
+                "complete": pair.get("complete", False),
+                "tx_pin": pair.get("tx", {}).get("pin") if pair.get("tx") else None,
+                "rx_pin": pair.get("rx", {}).get("pin") if pair.get("rx") else None,
+            }
+    return pin_rows
+
 def analyze_files(bsdl_path, netlist_path=None, uut_ref="U1"):
     info = parse_bsdl(bsdl_path)
     pins = info["pins"]
@@ -129,6 +210,9 @@ def analyze_files(bsdl_path, netlist_path=None, uut_ref="U1"):
             "external": external,
         })
 
+    uart_pairs = build_uart_pairs_from_board_map(board_map or [])
+    pin_rows = annotate_uart_pairs_on_pins(pin_rows, uart_pairs)
+
     return {
         "chipname": info["chipname"],
         "tap": f"{info['chipname']}.cpu",
@@ -144,6 +228,7 @@ def analyze_files(bsdl_path, netlist_path=None, uut_ref="U1"):
         "netlist_parser": parser_name,
         "uut_ref": used_uut_ref,
         "unknown_uut_pins": unknown_uut_pins,
+        "uart_pairs": uart_pairs,
     }
 
 
@@ -449,6 +534,120 @@ def run_external_pin_job(job_id, bsdl_path, netlist_path, pin, options=None):
                 try: proc.kill()
                 except Exception: pass
 
+
+
+
+def run_uart_pair_job(job_id, bsdl_path, netlist_path, uart_id, tx_pin=None, rx_pin=None, options=None):
+    """Revisión conjunta de pareja UART según netlist.
+
+    Es una prueba eléctrica conjunta, no una transmisión UART con baud rate.
+    Revisa las dos líneas que forman la pareja:
+      TX del UUT -> RX/GPIO de Raspberry
+      RX del UUT <- TX/GPIO de Raspberry
+    """
+    options = options or {}
+    q = jobs[job_id]["queue"]
+    jobs[job_id]["status"] = "running"
+    out_dir = os.path.join(REPORT_BASE_DIR, job_id)
+    os.makedirs(out_dir, exist_ok=True)
+    jobs[job_id]["out_dir"] = out_dir
+    proc = None
+    sock = None
+    try:
+        if not netlist_path:
+            raise RuntimeError("Para revisar UART completo necesito netlist con NET_UARTx_TX y NET_UARTx_RX.")
+        info = parse_bsdl(bsdl_path)
+        chipname = info["chipname"]
+        tap = f"{chipname}.cpu"
+        _, nets = parse_netlist(netlist_path)
+        refs = [options.get("uut_ref") or "U1"] + DEFAULT_UUT_REFS
+        uut_ref = normalize_ref(options.get("uut_ref")) if options.get("uut_ref") else find_uut_ref_in_netlist(nets, refs)
+        board_map, _ = build_board_map(nets, info["pins"], uut_ref)
+        pairs = build_uart_pairs_from_board_map(board_map)
+
+        chosen = None
+        if uart_id:
+            uid = str(uart_id).upper()
+            chosen = next((p for p in pairs if str(p.get("id", "")).upper() == uid), None)
+        if not chosen and tx_pin and rx_pin:
+            tx_pin = tx_pin.upper(); rx_pin = rx_pin.upper()
+            chosen = {"id": "MANUAL", "tx": {"pin": tx_pin}, "rx": {"pin": rx_pin}, "complete": True, "label": f"MANUAL: TX {tx_pin} / RX {rx_pin}"}
+        if not chosen:
+            raise RuntimeError("No encontré pareja UART. Usa nombres como NET_UART0_TX y NET_UART0_RX en el netlist.")
+        if not chosen.get("tx") or not chosen.get("rx"):
+            raise RuntimeError(f"{chosen.get('id')} no está completo: falta TX o RX en el netlist.")
+
+        selected_pins = {chosen["tx"]["pin"], chosen["rx"]["pin"]}
+        from jtag_tester_core import build_external_line_tests, run_external_line_tests
+        all_tests = build_external_line_tests(nets, info["pins"], uut_ref, external_bidir=False)
+        tests = [t for t in all_tests if str(t.get("uut_pin", "")).upper() in selected_pins]
+        # Mantener sólo las líneas de la misma pareja UART si el net tiene ID.
+        if chosen.get("id") != "MANUAL":
+            tests = [t for t in tests if uart_id_from_net(t.get("net")) == chosen.get("id")]
+        if len(tests) < 2:
+            raise RuntimeError("Encontré la pareja, pero no encontré las dos conexiones PI.GPIOxx. Ejemplo necesario: NET_UART0_TX U1.PE1 PI.GPIO15 y NET_UART0_RX U1.PE0 PI.GPIO14.")
+
+        put(q, f"Empezó revisión UART completa: {chosen.get('label')}\n", "info")
+        put(q, "Esta revisión prueba las dos líneas juntas como pareja TX/RX del mismo UART.\n", "info")
+        put(q, "Nota: no se mezcla UART0_TX con UART1_RX salvo que elijas pareja manual. Lo correcto es TX0 con RX0.\n\n", "info")
+        for t in tests:
+            put(q, f"Línea: {t['net']} · UUT {t['uut_pin']} <-> PI.GPIO{t['pi_gpio']} · {t['direction']}\n", "info")
+
+        cfg_path = create_openocd_cfg(chipname, info["irlen"], work_dir=out_dir)
+        proc, sock = start_openocd(cfg_path)
+        jobs[job_id]["proc"] = proc
+        recv_all(sock)
+        put(q, "SCAN CHAIN:\n" + cmd(sock, "scan_chain") + "\n", "log")
+        cmd(sock, f"irscan {tap} {info['idcode']}")
+        put(q, "IDCODE:\n" + cmd(sock, f"drscan {tap} 32 0") + "\n", "log")
+
+        report = run_external_line_tests(sock, tap, info["extest"], info["sample"], info["bits"], info["pins"], tests)
+        extest_write(sock, tap, info["extest"], info["bits"], 0)
+        full_report = {"uart": chosen, "tests": report}
+        with open(os.path.join(out_dir, "uart_pair_report.json"), "w", encoding="utf-8") as f:
+            json.dump(full_report, f, indent=2, ensure_ascii=False)
+        ok = sum(1 for r in report if r.get("status") == "OK")
+        fail = sum(1 for r in report if r.get("status") == "FAIL")
+        err = sum(1 for r in report if r.get("status") == "ERROR")
+        passed = (ok >= 2 and fail == 0 and err == 0)
+        put(q, f"Resultado UART {chosen.get('id')}: OK {ok} | FAIL {fail} | ERROR {err}\n", "done" if passed else "error")
+        if passed:
+            put(q, "UART eléctrico: PASS. Las dos líneas TX/RX responden como pareja.\n", "done")
+        else:
+            put(q, "UART eléctrico: FAIL/ERROR. Revisa cruce TX/RX, GND común, GPIO usado o netlist.\n", "error")
+        jobs[job_id]["status"] = "done" if passed else "error"
+        put(q, "__DONE__", "done")
+    except Exception as e:
+        jobs[job_id]["status"] = "error"
+        put(q, f"ERROR: {e}\n", "error")
+        put(q, "__DONE__", "done")
+    finally:
+        if sock:
+            try: sock.close()
+            except Exception: pass
+        if proc:
+            try: proc.terminate(); proc.wait(timeout=5)
+            except Exception:
+                try: proc.kill()
+                except Exception: pass
+
+
+@app.route("/api/start-uart-pair", methods=["POST"])
+def start_uart_pair_test():
+    if "bsdl" not in request.files:
+        return jsonify({"ok": False, "error": "No recibí archivo BSDL"}), 400
+    uart_id = (request.form.get("uart_id") or "").strip().upper()
+    tx_pin = (request.form.get("tx_pin") or "").strip().upper() or None
+    rx_pin = (request.form.get("rx_pin") or "").strip().upper() or None
+    job_id = str(uuid.uuid4())
+    bsdl_file = request.files["bsdl"]
+    netlist_file = request.files.get("netlist")
+    bsdl_path, netlist_path = save_uploaded_files(job_id, bsdl_file, netlist_file)
+    options = {"uut_ref": request.form.get("uut_ref", "U1")}
+    jobs[job_id] = {"queue": queue.Queue(), "status": "created", "created_at": time.time(), "proc": None, "filename": bsdl_file.filename, "netlist_filename": netlist_file.filename if netlist_file and netlist_file.filename else None, "options": options, "out_dir": None}
+    t = threading.Thread(target=run_uart_pair_job, args=(job_id, bsdl_path, netlist_path, uart_id, tx_pin, rx_pin, options), daemon=True)
+    t.start()
+    return jsonify({"ok": True, "job_id": job_id})
 
 @app.route("/api/start-special-pin", methods=["POST"])
 def start_special_pin_test():

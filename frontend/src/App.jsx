@@ -46,6 +46,7 @@ function App() {
   const [sidebarOpen, setSidebarOpen] = useState(true);
   const [uploadOpen, setUploadOpen] = useState(true);
   const [pinFilter, setPinFilter] = useState("");
+  const [selectedUartOther, setSelectedUartOther] = useState("");
   const outputRef = useRef(null);
 
   const summary = useMemo(() => {
@@ -67,6 +68,27 @@ function App() {
     if (!selectedPin) return null;
     return (board?.pins || []).find((p) => p.name === selectedPin) || null;
   }, [board, selectedPin]);
+
+  const uartOtherCandidates = useMemo(() => {
+    if (!currentPin?.uart_pair) return [];
+    const role = currentPin.uart_pair.role;
+    const opposite = role === "TX" ? "RX" : "TX";
+    return (board?.pins || []).filter((p) => p?.uart_pair?.role === opposite);
+  }, [board, currentPin]);
+
+  const activeUartOtherPin = useMemo(() => {
+    if (!currentPin?.uart_pair) return "";
+    const names = uartOtherCandidates.map((p) => p.name);
+    const def = currentPin.uart_pair.other_pin || names[0] || "";
+    return names.includes(selectedUartOther) ? selectedUartOther : def;
+  }, [currentPin, uartOtherCandidates, selectedUartOther]);
+
+  const activeUartMode = useMemo(() => {
+    if (!currentPin?.uart_pair || !activeUartOtherPin) return null;
+    const other = (board?.pins || []).find((p) => p.name === activeUartOtherPin);
+    const same = other?.uart_pair?.id && other.uart_pair.id === currentPin.uart_pair.id;
+    return { other, same, id: same ? currentPin.uart_pair.id : "MANUAL" };
+  }, [board, currentPin, activeUartOtherPin]);
 
   const progress = useMemo(() => {
     const matches = output.match(/\[(\d+)\/(\d+)\]/g);
@@ -163,6 +185,34 @@ function App() {
     } catch (err) { setRunning(false); setError(err.message || "No pude conectar con la Raspberry Pi."); }
   }
 
+
+  async function startUartPairTest() {
+    if (!file || !netlistFile || !currentPin?.uart_pair || !activeUartOtherPin) {
+      setError("Para revisar UART completo necesitas BSDL, netlist y una pareja TX/RX.");
+      return;
+    }
+    const role = currentPin.uart_pair.role;
+    const txPin = role === "TX" ? currentPin.name : activeUartOtherPin;
+    const rxPin = role === "RX" ? currentPin.name : activeUartOtherPin;
+    const other = activeUartMode?.other;
+    const samePair = activeUartMode?.same;
+    setRunning(true); setDone(false); setOutput(""); setReports([]); setError("");
+    try {
+      appendOutput(`Revisión UART completa iniciada: TX ${txPin} / RX ${rxPin}.\n`);
+      appendOutput(samePair ? `Pareja detectada automáticamente: ${currentPin.uart_pair.id}.\n\n` : "Pareja manual: úsala sólo si sabes que esos dos pines pertenecen a la misma conexión.\n\n");
+      const body = makeForm({
+        uart_id: samePair ? currentPin.uart_pair.id : "",
+        tx_pin: txPin,
+        rx_pin: rxPin,
+        other_pin: other?.name || activeUartOtherPin,
+      });
+      const res = await fetch(`${apiUrl}/api/start-uart-pair`, { method: "POST", body });
+      const data = await res.json();
+      if (!data.ok) throw new Error(data.error || "No se pudo iniciar la revisión UART completa.");
+      consumeJob(data.job_id);
+    } catch (err) { setRunning(false); setError(err.message || "No pude conectar con la Raspberry Pi."); }
+  }
+
   return (
     <div className={`appShell ${sidebarOpen ? "withSidebar" : "closedSidebar"}`}>
       <aside className="sideBar">
@@ -179,6 +229,7 @@ function App() {
               <button key={p.name} className={`pinBtn ${selectedPin === p.name ? "active" : ""} ${p.special ? "specialPin" : ""}`} onClick={() => setSelectedPin(p.name)}>
                 <b>{p.name}</b>
                 {p.special && <em>{p.special.label}</em>}
+                {p.uart_pair && <em className="uartTag">{p.uart_pair.id}</em>}
                 <small>{(p.functions || []).slice(0, 1).join(" · ")}</small>
               </button>
             ))}
@@ -219,9 +270,19 @@ function App() {
             <div className="pinInspector">
               <div><div className="panelTitle noPad">Pin seleccionado</div>{currentPin ? <><h2>{currentPin.name}</h2><p className="muted">IN {currentPin.input_bit} · OUT {currentPin.output_bit} · CTRL {currentPin.control_bit ?? "-"}</p><div className="chips">{(currentPin.functions || []).map((f) => <span key={f}>{f}</span>)}</div><p><b>Nets:</b> {(currentPin.nets || []).length ? currentPin.nets.join(", ") : "sin netlist"}</p>{currentPin.external && <p className="externalHint"><b>Conexión:</b> PI.GPIO{currentPin.external.pi_gpio} · {currentPin.external.direction_hint}</p>}</> : <p className="muted">Selecciona un pin de la barra lateral.</p>}</div>
               <div className="pinActions">
-                {currentPin?.special && <span className="specialBig">Especial: {currentPin.special.kind}</span>}
+                {currentPin?.special && <span className="specialBig">Especial: {currentPin.special.kind}{currentPin.uart_pair ? ` · ${currentPin.uart_pair.id}` : ""}</span>}
                 <button className="primary" onClick={() => startPinTest()} disabled={running || !currentPin}>Probar pin</button>
                 {currentPin?.special && <button className="secondary" onClick={() => startSpecialPinTest()} disabled={running || !currentPin || !netlistFile}>Probar conexión {currentPin.special.kind}</button>}
+                {currentPin?.uart_pair && <div className="uartBox">
+                  <b>UART completo</b>
+                  <small>Lo correcto es usar la pareja del mismo número: TX0 con RX0, TX1 con RX1.</small>
+                  <label>Segundo pin</label>
+                  <select value={activeUartOtherPin} onChange={(e) => setSelectedUartOther(e.target.value)} disabled={running || !netlistFile}>
+                    {uartOtherCandidates.map((p) => <option key={p.name} value={p.name}>{p.name} · {p.uart_pair?.id}{p.name === currentPin.uart_pair.other_pin ? " · recomendado" : ""}</option>)}
+                  </select>
+                  {activeUartMode && <small className={activeUartMode.same ? "okText" : "warnText"}>{activeUartMode.same ? `Pareja correcta: ${activeUartMode.id}` : "Atención: pareja manual/no mismo UART"}</small>}
+                  <button className="primary" onClick={startUartPairTest} disabled={running || !currentPin || !netlistFile || !activeUartOtherPin}>Revisar UART completo</button>
+                </div>}
               </div>
             </div>
             <div className="terminalTop"><span></span><span></span><span></span><b>{running ? "Consola técnica en vivo" : "Resumen entendible"}</b></div>
