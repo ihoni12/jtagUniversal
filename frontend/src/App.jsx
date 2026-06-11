@@ -151,6 +151,18 @@ function App() {
     } catch (err) { setRunning(false); setError(err.message || "No pude conectar con la Raspberry Pi."); }
   }
 
+  async function startSpecialPinTest(pinName = selectedPin) {
+    if (!file || !netlistFile || !pinName) { setError("Para probar TX/RX o conexión especial necesitas BSDL, netlist y un pin."); return; }
+    setRunning(true); setDone(false); setOutput(""); setReports([]); setError("");
+    try {
+      appendOutput(`Revisión de conexión especial del pin ${pinName} iniciada.\n\n`);
+      const res = await fetch(`${apiUrl}/api/start-special-pin`, { method: "POST", body: makeForm({ pin: pinName }) });
+      const data = await res.json();
+      if (!data.ok) throw new Error(data.error || "No se pudo iniciar la prueba especial del pin.");
+      consumeJob(data.job_id);
+    } catch (err) { setRunning(false); setError(err.message || "No pude conectar con la Raspberry Pi."); }
+  }
+
   return (
     <div className={`appShell ${sidebarOpen ? "withSidebar" : "closedSidebar"}`}>
       <aside className="sideBar">
@@ -164,8 +176,10 @@ function App() {
           <input className="pinSearch" placeholder="Buscar pin" value={pinFilter} onChange={(e) => setPinFilter(e.target.value)} />
           <div className="pinList compactPins">
             {filteredPins.map((p) => (
-              <button key={p.name} className={`pinBtn ${selectedPin === p.name ? "active" : ""}`} onClick={() => setSelectedPin(p.name)}>
-                <b>{p.name}</b><small>{(p.functions || []).slice(0, 2).join(" · ")}</small>
+              <button key={p.name} className={`pinBtn ${selectedPin === p.name ? "active" : ""} ${p.special ? "specialPin" : ""}`} onClick={() => setSelectedPin(p.name)}>
+                <b>{p.name}</b>
+                {p.special && <em>{p.special.label}</em>}
+                <small>{(p.functions || []).slice(0, 1).join(" · ")}</small>
               </button>
             ))}
             {!board && <p className="mutedSide">No hay pines todavía.</p>}
@@ -203,8 +217,12 @@ function App() {
 
           <section className="card dashboard cleanDashboard">
             <div className="pinInspector">
-              <div><div className="panelTitle noPad">Pin seleccionado</div>{currentPin ? <><h2>{currentPin.name}</h2><p className="muted">IN {currentPin.input_bit} · OUT {currentPin.output_bit} · CTRL {currentPin.control_bit ?? "-"}</p><div className="chips">{(currentPin.functions || []).map((f) => <span key={f}>{f}</span>)}</div><p><b>Nets:</b> {(currentPin.nets || []).length ? currentPin.nets.join(", ") : "sin netlist"}</p></> : <p className="muted">Selecciona un pin de la barra lateral.</p>}</div>
-              <button className="primary" onClick={() => startPinTest()} disabled={running || !currentPin}>Probar pin</button>
+              <div><div className="panelTitle noPad">Pin seleccionado</div>{currentPin ? <><h2>{currentPin.name}</h2><p className="muted">IN {currentPin.input_bit} · OUT {currentPin.output_bit} · CTRL {currentPin.control_bit ?? "-"}</p><div className="chips">{(currentPin.functions || []).map((f) => <span key={f}>{f}</span>)}</div><p><b>Nets:</b> {(currentPin.nets || []).length ? currentPin.nets.join(", ") : "sin netlist"}</p>{currentPin.external && <p className="externalHint"><b>Conexión:</b> PI.GPIO{currentPin.external.pi_gpio} · {currentPin.external.direction_hint}</p>}</> : <p className="muted">Selecciona un pin de la barra lateral.</p>}</div>
+              <div className="pinActions">
+                {currentPin?.special && <span className="specialBig">Especial: {currentPin.special.kind}</span>}
+                <button className="primary" onClick={() => startPinTest()} disabled={running || !currentPin}>Probar pin</button>
+                {currentPin?.special && <button className="secondary" onClick={() => startSpecialPinTest()} disabled={running || !currentPin || !netlistFile}>Probar conexión {currentPin.special.kind}</button>}
+              </div>
             </div>
             <div className="terminalTop"><span></span><span></span><span></span><b>{running ? "Consola técnica en vivo" : "Resumen entendible"}</b></div>
             <pre className={`terminal ${done && !running ? "friendly" : ""}`} ref={outputRef}>{output ? (done && !running ? cleanConsoleForUser(output) : output) : "Esperando revisión..."}</pre>
