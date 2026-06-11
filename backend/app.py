@@ -10,6 +10,13 @@ import json
 import re
 import shutil
 
+from jtag_tester_core import (
+    parse_bsdl, parse_netlist, normalize_ref, find_uut_ref_in_netlist,
+    build_board_map, DEFAULT_UUT_REFS, create_openocd_cfg, start_openocd, recv_all,
+    cmd, sample, extest_write
+)
+from revisiones.pin_review import review_pin
+
 app = Flask(__name__)
 CORS(app)
 
@@ -64,6 +71,88 @@ def simplify_line(line):
         return line
     return None
 
+
+
+def save_uploaded_files(job_id, bsdl_file, netlist_file=None):
+    job_upload_dir = os.path.join(UPLOAD_DIR, job_id)
+    os.makedirs(job_upload_dir, exist_ok=True)
+    bsdl_path = os.path.abspath(os.path.join(job_upload_dir, safe_name(bsdl_file.filename)))
+    bsdl_file.save(bsdl_path)
+    netlist_path = None
+    if netlist_file and netlist_file.filename:
+        netlist_path = os.path.abspath(os.path.join(job_upload_dir, safe_name(netlist_file.filename)))
+        netlist_file.save(netlist_path)
+    return bsdl_path, netlist_path
+
+
+def analyze_files(bsdl_path, netlist_path=None, uut_ref="U1"):
+    info = parse_bsdl(bsdl_path)
+    pins = info["pins"]
+    nets = None
+    board_map = []
+    unknown_uut_pins = []
+    used_uut_ref = normalize_ref(uut_ref or "U1")
+    parser_name = None
+
+    if netlist_path:
+        parser_name, nets = parse_netlist(netlist_path)
+        refs = list(dict.fromkeys([used_uut_ref] + DEFAULT_UUT_REFS))
+        used_uut_ref = normalize_ref(uut_ref) if uut_ref else find_uut_ref_in_netlist(nets, refs)
+        board_map, unknown_uut_pins = build_board_map(nets, pins, used_uut_ref)
+
+    pin_nets = {}
+    pin_connections = {}
+    for item in board_map or []:
+        driver = item.get("driver")
+        if not driver:
+            continue
+        pin_nets.setdefault(driver, []).append(item.get("net"))
+        pin_connections.setdefault(driver, []).extend(item.get("all_connections", []))
+
+    pin_rows = []
+    for name in sorted(pins.keys()):
+        data = pins[name]
+        pin_rows.append({
+            "name": name,
+            "input_bit": data.get("input_bit"),
+            "output_bit": data.get("output_bit"),
+            "control_bit": data.get("control_bit"),
+            "nets": sorted(set(pin_nets.get(name, []))),
+            "connections": pin_connections.get(name, []),
+            "functions": guess_pin_functions(name, sorted(set(pin_nets.get(name, []))))
+        })
+
+    return {
+        "chipname": info["chipname"],
+        "tap": f"{info['chipname']}.cpu",
+        "bits": info["bits"],
+        "irlen": info["irlen"],
+        "extest": info["extest"],
+        "sample": info["sample"],
+        "idcode": info["idcode"],
+        "pin_count": len(pin_rows),
+        "pins": pin_rows,
+        "net_count": len(nets or {}),
+        "board_map_count": len(board_map or []),
+        "netlist_parser": parser_name,
+        "uut_ref": used_uut_ref,
+        "unknown_uut_pins": unknown_uut_pins,
+    }
+
+
+def guess_pin_functions(pin, nets):
+    hay = " ".join([pin] + list(nets)).upper()
+    funcs = []
+    checks = [
+        ("TX", "UART TX"), ("RX", "UART RX"), ("UART", "UART"),
+        ("MOSI", "SPI MOSI"), ("MISO", "SPI MISO"), ("SCK", "SPI SCK"), ("SPI", "SPI"),
+        ("SDA", "I2C SDA"), ("SCL", "I2C SCL"), ("I2C", "I2C"),
+        ("PWM", "PWM"), ("ADC", "ADC"), ("GPIO", "GPIO"),
+    ]
+    for key, label in checks:
+        if key in hay and label not in funcs:
+            funcs.append(label)
+    return funcs or ["BSDL pin"]
 
 def emit_external_report(q, out_dir):
     path = os.path.join(out_dir, "external_line_test_report.json")
@@ -166,6 +255,99 @@ def run_jtag_job(job_id, bsdl_path, netlist_path=None, options=None):
         put(q, f"ERROR: {e}\n", "error")
         put(q, "__DONE__", "done")
 
+
+@app.route("/api/analyze", methods=["POST"])
+def analyze_upload():
+    if "bsdl" not in request.files:
+        return jsonify({"ok": False, "error": "No recibí archivo BSDL"}), 400
+    bsdl_file = request.files["bsdl"]
+    if not bsdl_file.filename:
+        return jsonify({"ok": False, "error": "Archivo BSDL vacío"}), 400
+    job_id = str(uuid.uuid4())
+    netlist_file = request.files.get("netlist")
+    bsdl_path, netlist_path = save_uploaded_files(job_id, bsdl_file, netlist_file)
+    try:
+        data = analyze_files(bsdl_path, netlist_path, request.form.get("uut_ref", "U1"))
+        data["session_id"] = job_id
+        return jsonify({"ok": True, "data": data})
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 400
+
+
+def run_pin_job(job_id, bsdl_path, netlist_path, pin, options=None):
+    options = options or {}
+    q = jobs[job_id]["queue"]
+    jobs[job_id]["status"] = "running"
+    out_dir = os.path.join(REPORT_BASE_DIR, job_id)
+    os.makedirs(out_dir, exist_ok=True)
+    jobs[job_id]["out_dir"] = out_dir
+    proc = None
+    sock = None
+    try:
+        info = parse_bsdl(bsdl_path)
+        chipname = info["chipname"]
+        tap = f"{chipname}.cpu"
+        bits = info["bits"]
+        extest = info["extest"]
+        sample_opcode = info["sample"]
+        idcode = info["idcode"]
+        board_map = None
+        if netlist_path:
+            _, nets = parse_netlist(netlist_path)
+            refs = [options.get("uut_ref") or "U1"] + DEFAULT_UUT_REFS
+            uut_ref = normalize_ref(options.get("uut_ref")) if options.get("uut_ref") else find_uut_ref_in_netlist(nets, refs)
+            board_map, _ = build_board_map(nets, info["pins"], uut_ref)
+
+        put(q, f"Empezó revisión del pin {pin}.\n", "info")
+        cfg_path = create_openocd_cfg(chipname, info["irlen"])
+        proc, sock = start_openocd(cfg_path)
+        jobs[job_id]["proc"] = proc
+        recv_all(sock)
+        put(q, "SCAN CHAIN:\n" + cmd(sock, "scan_chain") + "\n", "log")
+        cmd(sock, f"irscan {tap} {idcode}")
+        put(q, "IDCODE:\n" + cmd(sock, f"drscan {tap} 32 0") + "\n", "log")
+        result = review_pin(sock, tap, extest, sample_opcode, bits, info["pins"], pin, board_map=board_map)
+        extest_write(sock, tap, extest, bits, 0)
+        with open(os.path.join(out_dir, "single_pin_report.json"), "w", encoding="utf-8") as f:
+            json.dump(result, f, indent=2, ensure_ascii=False)
+        status = result.get("status")
+        put(q, f"Pin {pin}: {status}\n", "done" if result.get("passed") else "error")
+        if result.get("unexpected_followers"):
+            put(q, "Corto sospechoso con: " + ", ".join(result["unexpected_followers"]) + "\n", "error")
+        jobs[job_id]["status"] = "done"
+        put(q, "__DONE__", "done")
+    except Exception as e:
+        jobs[job_id]["status"] = "error"
+        put(q, f"ERROR: {e}\n", "error")
+        put(q, "__DONE__", "done")
+    finally:
+        if sock:
+            try: sock.close()
+            except Exception: pass
+        if proc:
+            try: proc.terminate(); proc.wait(timeout=5)
+            except Exception:
+                try: proc.kill()
+                except Exception: pass
+
+
+@app.route("/api/start-pin", methods=["POST"])
+def start_pin_test():
+    if "bsdl" not in request.files:
+        return jsonify({"ok": False, "error": "No recibí archivo BSDL"}), 400
+    pin = (request.form.get("pin") or "").strip().upper()
+    if not pin:
+        return jsonify({"ok": False, "error": "No recibí pin"}), 400
+    job_id = str(uuid.uuid4())
+    bsdl_file = request.files["bsdl"]
+    netlist_file = request.files.get("netlist")
+    bsdl_path, netlist_path = save_uploaded_files(job_id, bsdl_file, netlist_file)
+    options = {"uut_ref": request.form.get("uut_ref", "U1")}
+    jobs[job_id] = {"queue": queue.Queue(), "status": "created", "created_at": time.time(), "proc": None, "filename": bsdl_file.filename, "netlist_filename": netlist_file.filename if netlist_file and netlist_file.filename else None, "options": options, "out_dir": None}
+    t = threading.Thread(target=run_pin_job, args=(job_id, bsdl_path, netlist_path, pin, options), daemon=True)
+    t.start()
+    return jsonify({"ok": True, "job_id": job_id})
+
 @app.route("/api/start", methods=["POST"])
 def start_test():
     if "bsdl" not in request.files:
@@ -176,17 +358,8 @@ def start_test():
         return jsonify({"ok": False, "error": "Archivo BSDL vacío"}), 400
 
     job_id = str(uuid.uuid4())
-    job_upload_dir = os.path.join(UPLOAD_DIR, job_id)
-    os.makedirs(job_upload_dir, exist_ok=True)
-
-    bsdl_path = os.path.abspath(os.path.join(job_upload_dir, safe_name(bsdl_file.filename)))
-    bsdl_file.save(bsdl_path)
-
-    netlist_path = None
     netlist_file = request.files.get("netlist")
-    if netlist_file and netlist_file.filename:
-        netlist_path = os.path.abspath(os.path.join(job_upload_dir, safe_name(netlist_file.filename)))
-        netlist_file.save(netlist_path)
+    bsdl_path, netlist_path = save_uploaded_files(job_id, bsdl_file, netlist_file)
 
     options = {
         "uut_ref": request.form.get("uut_ref", "U1"),
