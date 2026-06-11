@@ -980,6 +980,21 @@ def test_one_pin(sock, tap, extest, sample_opcode, bits, pins, pin):
     }
 
 
+
+
+def pin_external_direction_from_board_map(board_map, pin):
+    """Detecta dirección externa del pin por netlist: RX/MISO => PI_TO_UUT."""
+    p = str(pin).upper()
+    for item in board_map or []:
+        if str(item.get("driver", "")).upper() != p:
+            continue
+        net = str(item.get("net", ""))
+        # Sólo aplica si hay una Raspberry/PI.GPIO como activador externo.
+        has_gpio = any(connection_pi_gpio(c) is not None for c in item.get("all_connections", []) or [])
+        if has_gpio:
+            return classify_external_direction(net, p, external_bidir=False)
+    return None
+
 def run_short_test(sock, tap, extest, sample_opcode, bits, pins, board_map=None):
     print("\n=== PRUEBA DE CORTOS VALIDADA CON NETLIST ===")
     print("Si un pin sigue al otro, primero reviso si el netlist dice que esa conexión es correcta.")
@@ -997,7 +1012,13 @@ def run_short_test(sock, tap, extest, sample_opcode, bits, pins, board_map=None)
         expected_followers = sorted(followers & allowed)
         unexpected_followers = sorted(followers - allowed)
 
-        if r.get("stuck_at_0"):
+        external_direction = pin_external_direction_from_board_map(board_map, pin)
+        input_from_pi = external_direction == "PI_TO_UUT"
+
+        if input_from_pi and (r.get("stuck_at_0") or r.get("stuck_at_1")):
+            status = "NO_COMPROBABLE_DIRECCION"
+            print("  [AVISO] este pin parece entrada (ej. RX/MISO). No marco stuck-at desde JTAG; debe probarse manejando PI.GPIO y leyendo con JTAG.")
+        elif r.get("stuck_at_0"):
             status = "STUCK_AT_0"
             print("  [FAIL] pegado a 0: pedí 1 y el pin no subió")
         elif r.get("stuck_at_1"):
@@ -1023,6 +1044,8 @@ def run_short_test(sock, tap, extest, sample_opcode, bits, pins, board_map=None)
             "allowed_detected_followers": expected_followers,
             "unexpected_followers": unexpected_followers,
             "driver_nets": sorted(pin_to_nets.get(pin, [])),
+            "external_direction": external_direction if 'external_direction' in locals() else None,
+            "message": "Pin de entrada: stuck-at desde JTAG omitido; usar PI.GPIO como activador externo." if ('input_from_pi' in locals() and input_from_pi and status == "NO_COMPROBABLE_DIRECCION") else None,
             "unexpected_follower_nets": {
                 other: sorted(pin_to_nets.get(other, [])) for other in unexpected_followers
             },
