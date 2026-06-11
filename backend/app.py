@@ -24,8 +24,11 @@ CORS(app)
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 UPLOAD_DIR = os.path.join(BASE_DIR, "uploads")
 REPORT_BASE_DIR = os.path.join(BASE_DIR, "jtag_web_reports")
+CURRENT_DIR = os.path.join(UPLOAD_DIR, "current")
+CURRENT_META = os.path.join(CURRENT_DIR, "meta.json")
 os.makedirs(UPLOAD_DIR, exist_ok=True)
 os.makedirs(REPORT_BASE_DIR, exist_ok=True)
+os.makedirs(CURRENT_DIR, exist_ok=True)
 
 jobs = {}
 
@@ -74,15 +77,79 @@ def simplify_line(line):
 
 
 
-def save_uploaded_files(job_id, bsdl_file, netlist_file=None):
-    job_upload_dir = os.path.join(UPLOAD_DIR, job_id)
-    os.makedirs(job_upload_dir, exist_ok=True)
-    bsdl_path = os.path.abspath(os.path.join(job_upload_dir, safe_name(bsdl_file.filename)))
-    bsdl_file.save(bsdl_path)
-    netlist_path = None
-    if netlist_file and netlist_file.filename:
-        netlist_path = os.path.abspath(os.path.join(job_upload_dir, safe_name(netlist_file.filename)))
+def _read_current_meta():
+    try:
+        with open(CURRENT_META, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:
+        return {}
+
+
+def _write_current_meta(meta):
+    os.makedirs(CURRENT_DIR, exist_ok=True)
+    with open(CURRENT_META, "w", encoding="utf-8") as f:
+        json.dump(meta, f, indent=2, ensure_ascii=False)
+
+
+def current_file_paths():
+    meta = _read_current_meta()
+    bsdl_path = meta.get("bsdl_path")
+    netlist_path = meta.get("netlist_path")
+    if not bsdl_path or not os.path.exists(bsdl_path):
+        bsdl_path = None
+    if not netlist_path or not os.path.exists(netlist_path):
+        netlist_path = None
+    return bsdl_path, netlist_path, meta
+
+
+def save_uploaded_files(job_id, bsdl_file=None, netlist_file=None):
+    """Guarda siempre una sola versión activa.
+
+    Si llega un BSDL nuevo, borra el anterior y deja estos archivos como
+    actuales. Si no llega BSDL, reutiliza el último guardado.
+    """
+    has_new_bsdl = bool(bsdl_file and bsdl_file.filename)
+    has_new_netlist = bool(netlist_file and netlist_file.filename)
+
+    if has_new_bsdl:
+        shutil.rmtree(CURRENT_DIR, ignore_errors=True)
+        os.makedirs(CURRENT_DIR, exist_ok=True)
+        bsdl_name = safe_name(bsdl_file.filename)
+        bsdl_path = os.path.abspath(os.path.join(CURRENT_DIR, bsdl_name))
+        bsdl_file.save(bsdl_path)
+        netlist_path = None
+        netlist_name = None
+        if has_new_netlist:
+            netlist_name = safe_name(netlist_file.filename)
+            netlist_path = os.path.abspath(os.path.join(CURRENT_DIR, netlist_name))
+            netlist_file.save(netlist_path)
+        meta = {
+            "bsdl_name": bsdl_name,
+            "bsdl_path": bsdl_path,
+            "netlist_name": netlist_name,
+            "netlist_path": netlist_path,
+            "updated_at": time.time(),
+        }
+        _write_current_meta(meta)
+        return bsdl_path, netlist_path
+
+    bsdl_path, netlist_path, _ = current_file_paths()
+    if not bsdl_path:
+        raise RuntimeError("No recibí BSDL y no hay BSDL guardado anteriormente.")
+
+    # Si no cambió el BSDL pero sí llega un netlist nuevo, reemplaza sólo el NET activo.
+    if has_new_netlist:
+        meta = _read_current_meta()
+        old_net = meta.get("netlist_path")
+        if old_net and os.path.exists(old_net):
+            try: os.remove(old_net)
+            except Exception: pass
+        netlist_name = safe_name(netlist_file.filename)
+        netlist_path = os.path.abspath(os.path.join(CURRENT_DIR, netlist_name))
         netlist_file.save(netlist_path)
+        meta.update({"netlist_name": netlist_name, "netlist_path": netlist_path, "updated_at": time.time()})
+        _write_current_meta(meta)
+
     return bsdl_path, netlist_path
 
 
@@ -394,17 +461,32 @@ def run_jtag_job(job_id, bsdl_path, netlist_path=None, options=None):
         put(q, "__DONE__", "done")
 
 
+@app.route("/api/current", methods=["GET"])
+def current_upload():
+    bsdl_path, netlist_path, meta = current_file_paths()
+    data = {
+        "has_bsdl": bool(bsdl_path),
+        "has_netlist": bool(netlist_path),
+        "bsdl_name": meta.get("bsdl_name"),
+        "netlist_name": meta.get("netlist_name"),
+        "updated_at": meta.get("updated_at"),
+    }
+    if bsdl_path:
+        try:
+            data["board"] = analyze_files(bsdl_path, netlist_path, meta.get("uut_ref", "U1"))
+        except Exception as e:
+            data["board_error"] = str(e)
+    return jsonify({"ok": True, "data": data})
+
+
 @app.route("/api/analyze", methods=["POST"])
 def analyze_upload():
-    if "bsdl" not in request.files:
-        return jsonify({"ok": False, "error": "No recibí archivo BSDL"}), 400
-    bsdl_file = request.files["bsdl"]
-    if not bsdl_file.filename:
-        return jsonify({"ok": False, "error": "Archivo BSDL vacío"}), 400
     job_id = str(uuid.uuid4())
+    bsdl_file = request.files.get("bsdl")
     netlist_file = request.files.get("netlist")
-    bsdl_path, netlist_path = save_uploaded_files(job_id, bsdl_file, netlist_file)
     try:
+        bsdl_path, netlist_path = save_uploaded_files(job_id, bsdl_file, netlist_file)
+        meta = _read_current_meta(); meta["uut_ref"] = request.form.get("uut_ref", "U1"); _write_current_meta(meta)
         data = analyze_files(bsdl_path, netlist_path, request.form.get("uut_ref", "U1"))
         data["session_id"] = job_id
         return jsonify({"ok": True, "data": data})
@@ -579,7 +661,7 @@ def run_uart_pair_job(job_id, bsdl_path, netlist_path, uart_id, tx_pin=None, rx_
 
         selected_pins = {chosen["tx"]["pin"], chosen["rx"]["pin"]}
         from jtag_tester_core import build_external_line_tests, run_external_line_tests
-        all_tests = build_external_line_tests(nets, info["pins"], uut_ref, external_bidir=False)
+        all_tests = build_external_line_tests(nets, info["pins"], uut_ref, external_bidir=True)
         tests = [t for t in all_tests if str(t.get("uut_pin", "")).upper() in selected_pins]
         # Mantener sólo las líneas de la misma pareja UART si el net tiene ID.
         if chosen.get("id") != "MANUAL":
@@ -642,34 +724,36 @@ def run_uart_pair_job(job_id, bsdl_path, netlist_path, uart_id, tx_pin=None, rx_
 
 @app.route("/api/start-uart-pair", methods=["POST"])
 def start_uart_pair_test():
-    if "bsdl" not in request.files:
-        return jsonify({"ok": False, "error": "No recibí archivo BSDL"}), 400
     uart_id = (request.form.get("uart_id") or "").strip().upper()
     tx_pin = (request.form.get("tx_pin") or "").strip().upper() or None
     rx_pin = (request.form.get("rx_pin") or "").strip().upper() or None
     job_id = str(uuid.uuid4())
-    bsdl_file = request.files["bsdl"]
+    bsdl_file = request.files.get("bsdl")
     netlist_file = request.files.get("netlist")
-    bsdl_path, netlist_path = save_uploaded_files(job_id, bsdl_file, netlist_file)
+    try:
+        bsdl_path, netlist_path = save_uploaded_files(job_id, bsdl_file, netlist_file)
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 400
     options = {"uut_ref": request.form.get("uut_ref", "U1")}
-    jobs[job_id] = {"queue": queue.Queue(), "status": "created", "created_at": time.time(), "proc": None, "filename": bsdl_file.filename, "netlist_filename": netlist_file.filename if netlist_file and netlist_file.filename else None, "options": options, "out_dir": None}
+    jobs[job_id] = {"queue": queue.Queue(), "status": "created", "created_at": time.time(), "proc": None, "filename": bsdl_file.filename if bsdl_file and bsdl_file.filename else os.path.basename(bsdl_path), "netlist_filename": netlist_file.filename if netlist_file and netlist_file.filename else (os.path.basename(netlist_path) if netlist_path else None), "options": options, "out_dir": None}
     t = threading.Thread(target=run_uart_pair_job, args=(job_id, bsdl_path, netlist_path, uart_id, tx_pin, rx_pin, options), daemon=True)
     t.start()
     return jsonify({"ok": True, "job_id": job_id})
 
 @app.route("/api/start-special-pin", methods=["POST"])
 def start_special_pin_test():
-    if "bsdl" not in request.files:
-        return jsonify({"ok": False, "error": "No recibí archivo BSDL"}), 400
     pin = (request.form.get("pin") or "").strip().upper()
     if not pin:
         return jsonify({"ok": False, "error": "No recibí pin"}), 400
     job_id = str(uuid.uuid4())
-    bsdl_file = request.files["bsdl"]
+    bsdl_file = request.files.get("bsdl")
     netlist_file = request.files.get("netlist")
-    bsdl_path, netlist_path = save_uploaded_files(job_id, bsdl_file, netlist_file)
+    try:
+        bsdl_path, netlist_path = save_uploaded_files(job_id, bsdl_file, netlist_file)
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 400
     options = {"uut_ref": request.form.get("uut_ref", "U1"), "external_bidir": request.form.get("external_bidir", "false") == "true"}
-    jobs[job_id] = {"queue": queue.Queue(), "status": "created", "created_at": time.time(), "proc": None, "filename": bsdl_file.filename, "netlist_filename": netlist_file.filename if netlist_file and netlist_file.filename else None, "options": options, "out_dir": None}
+    jobs[job_id] = {"queue": queue.Queue(), "status": "created", "created_at": time.time(), "proc": None, "filename": bsdl_file.filename if bsdl_file and bsdl_file.filename else os.path.basename(bsdl_path), "netlist_filename": netlist_file.filename if netlist_file and netlist_file.filename else (os.path.basename(netlist_path) if netlist_path else None), "options": options, "out_dir": None}
     t = threading.Thread(target=run_external_pin_job, args=(job_id, bsdl_path, netlist_path, pin, options), daemon=True)
     t.start()
     return jsonify({"ok": True, "job_id": job_id})
@@ -677,33 +761,31 @@ def start_special_pin_test():
 
 @app.route("/api/start-pin", methods=["POST"])
 def start_pin_test():
-    if "bsdl" not in request.files:
-        return jsonify({"ok": False, "error": "No recibí archivo BSDL"}), 400
     pin = (request.form.get("pin") or "").strip().upper()
     if not pin:
         return jsonify({"ok": False, "error": "No recibí pin"}), 400
     job_id = str(uuid.uuid4())
-    bsdl_file = request.files["bsdl"]
+    bsdl_file = request.files.get("bsdl")
     netlist_file = request.files.get("netlist")
-    bsdl_path, netlist_path = save_uploaded_files(job_id, bsdl_file, netlist_file)
+    try:
+        bsdl_path, netlist_path = save_uploaded_files(job_id, bsdl_file, netlist_file)
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 400
     options = {"uut_ref": request.form.get("uut_ref", "U1")}
-    jobs[job_id] = {"queue": queue.Queue(), "status": "created", "created_at": time.time(), "proc": None, "filename": bsdl_file.filename, "netlist_filename": netlist_file.filename if netlist_file and netlist_file.filename else None, "options": options, "out_dir": None}
+    jobs[job_id] = {"queue": queue.Queue(), "status": "created", "created_at": time.time(), "proc": None, "filename": bsdl_file.filename if bsdl_file and bsdl_file.filename else os.path.basename(bsdl_path), "netlist_filename": netlist_file.filename if netlist_file and netlist_file.filename else (os.path.basename(netlist_path) if netlist_path else None), "options": options, "out_dir": None}
     t = threading.Thread(target=run_pin_job, args=(job_id, bsdl_path, netlist_path, pin, options), daemon=True)
     t.start()
     return jsonify({"ok": True, "job_id": job_id})
 
 @app.route("/api/start", methods=["POST"])
 def start_test():
-    if "bsdl" not in request.files:
-        return jsonify({"ok": False, "error": "No recibí archivo BSDL"}), 400
-
-    bsdl_file = request.files["bsdl"]
-    if not bsdl_file.filename:
-        return jsonify({"ok": False, "error": "Archivo BSDL vacío"}), 400
-
+    bsdl_file = request.files.get("bsdl")
     job_id = str(uuid.uuid4())
     netlist_file = request.files.get("netlist")
-    bsdl_path, netlist_path = save_uploaded_files(job_id, bsdl_file, netlist_file)
+    try:
+        bsdl_path, netlist_path = save_uploaded_files(job_id, bsdl_file, netlist_file)
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 400
 
     options = {
         "uut_ref": request.form.get("uut_ref", "U1"),
@@ -720,8 +802,8 @@ def start_test():
         "status": "created",
         "created_at": time.time(),
         "proc": None,
-        "filename": bsdl_file.filename,
-        "netlist_filename": netlist_file.filename if netlist_file and netlist_file.filename else None,
+        "filename": bsdl_file.filename if bsdl_file and bsdl_file.filename else os.path.basename(bsdl_path),
+        "netlist_filename": netlist_file.filename if netlist_file and netlist_file.filename else (os.path.basename(netlist_path) if netlist_path else None),
         "options": options,
         "out_dir": None,
     }
