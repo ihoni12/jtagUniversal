@@ -157,7 +157,6 @@ def guess_pin_functions(pin, nets):
 def emit_external_report(q, out_dir):
     path = os.path.join(out_dir, "external_line_test_report.json")
     if not os.path.exists(path):
-        put(q, "\nLíneas externas detectadas: no se generó reporte. Revisa que el netlist tenga PI.GPIOxx y que esté activado --external-line-test.\n", "warn")
         return
     try:
         with open(path, "r", encoding="utf-8", errors="ignore") as f:
@@ -299,7 +298,7 @@ def run_pin_job(job_id, bsdl_path, netlist_path, pin, options=None):
             board_map, _ = build_board_map(nets, info["pins"], uut_ref)
 
         put(q, f"Empezó revisión del pin {pin}.\n", "info")
-        cfg_path = create_openocd_cfg(chipname, info["irlen"])
+        cfg_path = create_openocd_cfg(chipname, info["irlen"], work_dir=out_dir)
         proc, sock = start_openocd(cfg_path)
         jobs[job_id]["proc"] = proc
         recv_all(sock)

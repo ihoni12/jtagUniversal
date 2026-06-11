@@ -147,7 +147,7 @@ def parse_bsdl(bsdl_path):
     }
 
 
-def create_openocd_cfg(chipname, irlen):
+def create_openocd_cfg(chipname, irlen, work_dir=None):
     cfg = f"""
 interface bcm2835gpio
 

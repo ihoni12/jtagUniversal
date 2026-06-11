@@ -807,7 +807,7 @@ def print_external_line_summary(external_report):
 
 # ---------------- OpenOCD/JTAG ----------------
 
-def create_openocd_cfg(chipname, irlen):
+def create_openocd_cfg(chipname, irlen, work_dir=None):
     cfg = f"""
 interface bcm2835gpio
 
@@ -826,8 +826,11 @@ jtag newtap $CHIPNAME cpu -irlen {irlen}
 init
 scan_chain
 """
-    path = "/tmp/jtag_auto.cfg"
-    with open(path, "w") as f:
+    import tempfile
+    base = work_dir or os.path.join(os.path.dirname(os.path.abspath(__file__)), "openocd_cfg")
+    os.makedirs(base, exist_ok=True)
+    fd, path = tempfile.mkstemp(prefix="jtag_auto_", suffix=".cfg", dir=base, text=True)
+    with os.fdopen(fd, "w") as f:
         f.write(cfg)
     return path
 
