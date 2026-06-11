@@ -959,11 +959,22 @@ def test_one_pin(sock, tap, extest, sample_opcode, bits, pins, pin):
         elif high_states[other] == 0 and low_states[other] == 0:
             stuck_low.append(other)
 
+    selected_high = high_states.get(pin)
+    selected_low = low_states.get(pin)
+    stuck_at_0 = selected_high != 1   # pedí 1 y siguió en 0
+    stuck_at_1 = selected_low != 0    # pedí 0 y siguió en 1
+    drive_ok = (selected_high == 1 and selected_low == 0)
+
     return {
         "pin": pin,
         "followers": sorted(set(followers)),
         "stuck_high": stuck_high,
         "stuck_low": stuck_low,
+        "selected_high_read": selected_high,
+        "selected_low_read": selected_low,
+        "stuck_at_0": stuck_at_0,
+        "stuck_at_1": stuck_at_1,
+        "drive_ok": drive_ok,
         "high_read_hex": f"0x{high_read:x}",
         "low_read_hex": f"0x{low_read:x}",
     }
@@ -986,7 +997,13 @@ def run_short_test(sock, tap, extest, sample_opcode, bits, pins, board_map=None)
         expected_followers = sorted(followers & allowed)
         unexpected_followers = sorted(followers - allowed)
 
-        if unexpected_followers:
+        if r.get("stuck_at_0"):
+            status = "STUCK_AT_0"
+            print("  [FAIL] pegado a 0: pedí 1 y el pin no subió")
+        elif r.get("stuck_at_1"):
+            status = "STUCK_AT_1"
+            print("  [FAIL] pegado a 1: pedí 0 y el pin no bajó")
+        elif unexpected_followers:
             status = "CORTO_SOSPECHOSO"
             print(f"  [CORTO?] seguidores NO permitidos por netlist: {unexpected_followers}")
             if expected_followers:
@@ -996,7 +1013,7 @@ def run_short_test(sock, tap, extest, sample_opcode, bits, pins, board_map=None)
             print(f"  [OK NETLIST] conexión esperada detectada: {expected_followers}")
         else:
             status = "OK_SIN_CORTO"
-            print("  [OK] no siguió ningún pin extra")
+            print("  [OK] no siguió ningún pin extra y no está pegado a 0/1")
 
         results.append({
             "driver": pin,

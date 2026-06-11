@@ -102,3 +102,19 @@ button:disabled { opacity: .55; cursor: not-allowed; }
 .pinActions button{padding:10px 11px}
 .uartBox{padding:9px;gap:6px}
 @media (max-width:950px){.pinList{height:250px}.pinBtn{min-height:38px}}
+
+.copyBtn {
+  margin-left: auto;
+  border: 1px solid rgba(255,255,255,.18);
+  background: rgba(255,255,255,.08);
+  color: inherit;
+  border-radius: 8px;
+  padding: 4px 10px;
+  font-size: 12px;
+  cursor: pointer;
+}
+.copyBtn:hover { background: rgba(255,255,255,.14); }
+.terminal.friendly {
+  white-space: pre-wrap;
+  line-height: 1.45;
+}

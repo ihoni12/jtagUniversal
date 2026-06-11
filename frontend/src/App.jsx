@@ -332,8 +332,8 @@ function App() {
                 </div>}
               </div>
             </div>
-            <div className="terminalTop"><span></span><span></span><span></span><b>{running ? "Consola técnica en vivo" : "Resumen entendible"}</b></div>
-            <pre className={`terminal ${done && !running ? "friendly" : ""}`} ref={outputRef}>{output ? (done && !running ? cleanConsoleForUser(output) : output) : "Esperando revisión..."}</pre>
+            <div className="terminalTop"><span></span><span></span><span></span><b>{running ? "Consola en vivo" : "Consola completa + informe final"}</b><button className="copyBtn" onClick={() => navigator.clipboard?.writeText(output || "")}>Copiar</button></div>
+            <pre className={`terminal ${done && !running ? "friendly" : ""}`} ref={outputRef}>{output || "Esperando revisión..."}</pre>
           </section>
         </div>
       </main>

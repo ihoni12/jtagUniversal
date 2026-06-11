@@ -10,7 +10,16 @@ def classify_pin_result(pin, raw_result, board_map=None):
     expected_followers = sorted(followers & allowed)
     unexpected_followers = sorted(followers - allowed)
 
-    if unexpected_followers:
+    stuck_at_0 = bool(raw_result.get("stuck_at_0"))
+    stuck_at_1 = bool(raw_result.get("stuck_at_1"))
+
+    if stuck_at_0:
+        status = "STUCK_AT_0"
+        passed = False
+    elif stuck_at_1:
+        status = "STUCK_AT_1"
+        passed = False
+    elif unexpected_followers:
         status = "CORTO_SOSPECHOSO"
         passed = False
     else:
@@ -29,6 +38,10 @@ def classify_pin_result(pin, raw_result, board_map=None):
         "unexpected_follower_nets": {
             other: sorted(pin_to_nets.get(other, [])) for other in unexpected_followers
         },
+        "stuck_at_0": stuck_at_0,
+        "stuck_at_1": stuck_at_1,
+        "selected_high_read": raw_result.get("selected_high_read"),
+        "selected_low_read": raw_result.get("selected_low_read"),
         "raw": raw_result,
     }
 

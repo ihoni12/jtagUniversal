@@ -392,6 +392,279 @@ def emit_external_report(q, out_dir):
             samples = result.get("samples", [])
             put(q, f"   {result.get('direction')}: {samples}\n", "log")
 
+
+
+def _status_word(status):
+    text = str(status or "ERROR").upper()
+    if text in ["OK", "PASS", "OK_SIN_CORTO", "OK_SEGUN_NETLIST"]:
+        return "PASS"
+    if text in ["STUCK_AT_0", "STUCK_AT_1", "CORTO_SOSPECHOSO", "OPEN_POSIBLE", "BRIDGE_POSIBLE", "MIXTO", "FAIL"]:
+        return "FAIL"
+    if text == "ERROR":
+        return "ERROR"
+    if "CORTO" in text or "STUCK" in text or "FAIL" in text:
+        return "FAIL"
+    return text
+
+
+def _human_check_name(item):
+    st = str(item.get("status") or "").upper()
+    if st == "STUCK_AT_0":
+        return "Pegado a 0"
+    if st == "STUCK_AT_1":
+        return "Pegado a 1"
+    if st == "CORTO_SOSPECHOSO":
+        return "Corto"
+    if st in ["OPEN_POSIBLE"]:
+        return "Abierto"
+    return item.get("check") or item.get("test") or "Revisión"
+
+
+def _reason_for_pin(item):
+    status = str(item.get("status") or "").upper()
+    simple = _status_word(status)
+    if simple == "PASS":
+        return "Sin errores detectados."
+    if item.get("error"):
+        return str(item.get("error"))
+    if status == "STUCK_AT_0" or item.get("stuck_at_0"):
+        return "El pin quedó pegado a 0: se pidió nivel 1, pero se leyó 0. Posible corto a GND, pista forzada abajo o pin dañado."
+    if status == "STUCK_AT_1" or item.get("stuck_at_1"):
+        return "El pin quedó pegado a 1: se pidió nivel 0, pero se leyó 1. Posible corto a VCC, pull-up fuerte o pin dañado."
+    if item.get("unexpected_followers"):
+        return "Posible corto con: " + ", ".join(item.get("unexpected_followers") or [])
+    if status == "OPEN_POSIBLE" or item.get("missing"):
+        miss = item.get("missing") or []
+        return "Posible abierto: la señal no llegó" + (" a " + ", ".join(miss) if miss else " al otro extremo esperado") + "."
+    if item.get("message"):
+        return str(item.get("message"))
+    if simple == "FAIL":
+        return "La respuesta del pin no coincide con lo esperado. Revisa pista, cable, soldadura o netlist."
+    return "No se pudo completar la lectura o escritura del pin."
+
+
+def _pin_line(item):
+    pin = item.get("pin") or item.get("uut_pin") or item.get("driver") or "?"
+    status = _status_word(item.get("status"))
+    role = item.get("role") or item.get("type") or item.get("function") or "Pin normal"
+    net = item.get("net")
+    gpio = item.get("pi_gpio")
+    extra = []
+    if role:
+        extra.append(str(role))
+    if net:
+        extra.append(str(net))
+    if gpio not in [None, "", "?"]:
+        extra.append(f"GPIO{gpio}")
+    suffix = f" ({' · '.join(extra)})" if extra else ""
+    return f"{pin}: {status}{suffix}"
+
+
+def _problem_groups(items):
+    groups = {
+        "Pines pegados a 0": [],
+        "Pines pegados a 1": [],
+        "Posibles cortos": [],
+        "Posibles abiertos": [],
+        "Errores de comunicación": [],
+        "Otros fallos": [],
+    }
+    for item in items:
+        st = str(item.get("status") or "").upper()
+        if st == "STUCK_AT_0" or item.get("stuck_at_0"):
+            groups["Pines pegados a 0"].append(item)
+        elif st == "STUCK_AT_1" or item.get("stuck_at_1"):
+            groups["Pines pegados a 1"].append(item)
+        elif st == "CORTO_SOSPECHOSO" or item.get("unexpected_followers"):
+            groups["Posibles cortos"].append(item)
+        elif st == "OPEN_POSIBLE" or item.get("missing"):
+            groups["Posibles abiertos"].append(item)
+        elif _status_word(st) == "ERROR":
+            groups["Errores de comunicación"].append(item)
+        elif _status_word(st) == "FAIL":
+            groups["Otros fallos"].append(item)
+    return groups
+
+
+def write_final_report(out_dir, *, title, chipname=None, bsdl_name=None, netlist_name=None,
+                       pins_found=None, selected_pins=None, tests_done=None, pin_results=None,
+                       connection_results=None, technical_notes=None, raw_status=None):
+    """Crea informe simple y avanzado claro para usuario, con detalle por pin."""
+    os.makedirs(out_dir, exist_ok=True)
+    pin_results = pin_results or []
+    connection_results = connection_results or []
+    tests_done = tests_done or []
+    selected_pins = sorted(set([str(x) for x in (selected_pins or []) if x]))
+    all_items = list(pin_results) + list(connection_results)
+    pass_count = sum(1 for x in all_items if _status_word(x.get("status")) == "PASS")
+    fail_count = sum(1 for x in all_items if _status_word(x.get("status")) == "FAIL")
+    error_count = sum(1 for x in all_items if _status_word(x.get("status")) == "ERROR")
+    final_status = "PASS" if fail_count == 0 and error_count == 0 else ("ERROR" if error_count else "FAIL")
+
+    if selected_pins:
+        selected_text = f"Pines usados en esta prueba: {len(selected_pins)} ({', '.join(selected_pins)})"
+    elif pins_found:
+        selected_text = "Pines usados en esta prueba: no se pudo contar desde el reporte."
+    else:
+        selected_text = "Pines usados en esta prueba: no informado."
+
+    lines = []
+    lines.append("══════════════════════════════════════")
+    lines.append("RESULTADO FINAL")
+    lines.append("══════════════════════════════════════")
+    lines.append(f"Estado: {final_status}")
+    lines.append("")
+    lines.append(f"Tipo de revisión: {title}")
+    if chipname:
+        lines.append(f"Placa / chip: {chipname}")
+    if bsdl_name:
+        lines.append(f"BSDL: {bsdl_name}")
+    if netlist_name:
+        lines.append(f"Netlist: {netlist_name}")
+    if pins_found is not None:
+        lines.append(f"Pines disponibles en el BSDL: {pins_found}")
+        lines.append(selected_text)
+        lines.append("Explicación: disponibles = todos los pines que existen en el archivo; usados = sólo los pines que esta prueba tocó realmente.")
+    lines.append("")
+    lines.append("Revisiones realizadas:")
+    if tests_done:
+        for t in tests_done:
+            lines.append(f"✓ {t}")
+    else:
+        lines.append("✓ Revisión ejecutada")
+    lines.append("")
+    lines.append("Resumen de resultados:")
+    lines.append(f"PASS: {pass_count}")
+    lines.append(f"FAIL: {fail_count}")
+    lines.append(f"ERROR: {error_count}")
+
+    problem_items = [x for x in all_items if _status_word(x.get("status")) != "PASS"]
+    lines.append("")
+    lines.append("Pines con problemas:")
+    if not problem_items:
+        lines.append("Ninguno.")
+    else:
+        for item in problem_items:
+            lines.append(f"- {_pin_line(item)}")
+            lines.append(f"  Motivo: {_reason_for_pin(item)}")
+
+    lines.append("")
+    lines.append("Resumen de problemas por tipo:")
+    groups = _problem_groups(problem_items)
+    for title_group, rows in groups.items():
+        if not rows:
+            lines.append(f"{title_group}: Ninguno")
+        else:
+            lines.append(f"{title_group}:")
+            for r in rows:
+                pin = r.get("pin") or r.get("uut_pin") or r.get("driver") or "?"
+                lines.append(f"- {pin}: {_reason_for_pin(r)}")
+
+    lines.append("")
+    lines.append("══════════════════════════════════════")
+    lines.append("INFORME AVANZADO")
+    lines.append("══════════════════════════════════════")
+    if all_items:
+        lines.append("Detalle por pin/conexión:")
+        for item in all_items:
+            lines.append(f"- {_pin_line(item)}")
+            lines.append(f"  Revisión: {_human_check_name(item)}")
+            lines.append(f"  Motivo: {_reason_for_pin(item)}")
+            raw = item.get("raw") or {}
+            if raw:
+                if "selected_high_read" in raw or "selected_low_read" in raw:
+                    lines.append(f"  Lectura: al pedir 1 leyó {raw.get('selected_high_read')}; al pedir 0 leyó {raw.get('selected_low_read')}")
+            if item.get("checks"):
+                lines.append("  Pruebas en este pin:")
+                for c in item.get("checks") or []:
+                    lines.append(f"    - {c}")
+    else:
+        lines.append("No hay detalle por pin en el reporte generado por esta revisión.")
+    if technical_notes:
+        lines.append("")
+        lines.append("Notas técnicas útiles:")
+        for n in technical_notes:
+            lines.append(f"- {n}")
+
+    if raw_status:
+        lines.append("")
+        lines.append(f"Estado técnico: {raw_status}")
+
+    txt = "\n".join(lines) + "\n"
+    data = {
+        "title": title,
+        "status": final_status,
+        "chipname": chipname,
+        "bsdl_name": bsdl_name,
+        "netlist_name": netlist_name,
+        "pins_found": pins_found,
+        "selected_pins": selected_pins,
+        "tests_done": tests_done,
+        "summary": {"pass": pass_count, "fail": fail_count, "error": error_count},
+        "problem_groups": {k: [(_pin_line(x)) for x in v] for k, v in groups.items()},
+        "pin_results": pin_results,
+        "connection_results": connection_results,
+        "technical_notes": technical_notes or [],
+        "created_at": time.time(),
+    }
+    txt_path = os.path.join(out_dir, "latest_report.txt")
+    json_path = os.path.join(out_dir, "latest_report.json")
+    with open(txt_path, "w", encoding="utf-8") as f:
+        f.write(txt)
+    with open(json_path, "w", encoding="utf-8") as f:
+        json.dump(data, f, indent=2, ensure_ascii=False)
+    try:
+        shutil.copyfile(txt_path, os.path.join(REPORT_BASE_DIR, "latest_report.txt"))
+        shutil.copyfile(json_path, os.path.join(REPORT_BASE_DIR, "latest_report.json"))
+    except Exception:
+        pass
+    return txt, data
+
+
+def short_results_to_items(report, check_name="Revisión de pin normal"):
+    items = []
+    for r in report or []:
+        raw = r.get("raw") or {}
+        status = r.get("status")
+        checks = ["Cambio 0/1", "Stuck-at-0", "Stuck-at-1", "Cortos"]
+        items.append({
+            "pin": r.get("driver") or r.get("pin") or raw.get("pin"),
+            "status": status,
+            "role": "Pin normal",
+            "check": check_name,
+            "net": ", ".join(r.get("driver_nets") or []) or None,
+            "unexpected_followers": r.get("unexpected_followers") or [],
+            "stuck_at_0": status == "STUCK_AT_0" or raw.get("stuck_at_0"),
+            "stuck_at_1": status == "STUCK_AT_1" or raw.get("stuck_at_1"),
+            "raw": raw,
+            "checks": checks,
+        })
+    return items
+
+def external_results_to_items(report, check_name="Conectividad externa"):
+    items = []
+    for r in report or []:
+        net = r.get("net")
+        role = "Pin normal"
+        up = f"{net or ''} {r.get('uut_pin') or ''}".upper()
+        if "UART" in up or "TX" in up or "RX" in up:
+            role = "UART TX" if "TX" in up else ("UART RX" if "RX" in up else "UART")
+        elif "SPI" in up or any(x in up for x in ["MOSI", "MISO", "SCK"]):
+            role = "SPI"
+        elif "I2C" in up or any(x in up for x in ["SDA", "SCL"]):
+            role = "I2C"
+        items.append({
+            "pin": r.get("uut_pin"),
+            "status": r.get("status"),
+            "net": net,
+            "pi_gpio": r.get("pi_gpio"),
+            "role": role,
+            "check": check_name,
+            "error": r.get("error"),
+            "direction": r.get("direction"),
+        })
+    return items
+
 def run_jtag_job(job_id, bsdl_path, netlist_path=None, options=None):
     options = options or {}
     q = jobs[job_id]["queue"]
@@ -449,8 +722,53 @@ def run_jtag_job(job_id, bsdl_path, netlist_path=None, options=None):
                     put(q, line, "log")
 
         proc.wait()
+        external_items = []
+        pin_items = []
         if netlist_path and options.get("external_line_test", True):
             emit_external_report(q, out_dir)
+            ext_path = os.path.join(out_dir, "external_line_test_report.json")
+            if os.path.exists(ext_path):
+                try:
+                    with open(ext_path, "r", encoding="utf-8") as f:
+                        external_items = external_results_to_items(json.load(f), "Conectividad externa")
+                except Exception:
+                    external_items = []
+        short_path = os.path.join(out_dir, "short_test_report.json")
+        if os.path.exists(short_path):
+            try:
+                with open(short_path, "r", encoding="utf-8") as f:
+                    pin_items = short_results_to_items(json.load(f), "Pin normal: cortos y pegado a 0/1")
+            except Exception:
+                pin_items = []
+        try:
+            info = parse_bsdl(bsdl_path)
+            selected = sorted(set([x.get("pin") for x in pin_items + external_items if x.get("pin")]))
+            tests_done = [
+                "Análisis BSDL",
+                "Boundary Scan JTAG",
+                "Stuck-at-0: detectar pines pegados a 0",
+                "Stuck-at-1: detectar pines pegados a 1",
+                "Revisión de cortos entre pines",
+                "Revisión de abiertos / conexiones según netlist" if netlist_path else "Revisión general sin netlist",
+            ]
+            if netlist_path and options.get("external_line_test", True):
+                tests_done.append("Revisión de conexiones externas con Raspberry")
+            report_txt, _ = write_final_report(
+                out_dir,
+                title="Revisión completa",
+                chipname=info.get("chipname"),
+                bsdl_name=os.path.basename(bsdl_path),
+                netlist_name=os.path.basename(netlist_path) if netlist_path else None,
+                pins_found=len(info.get("pins", {})),
+                selected_pins=selected if selected else None,
+                tests_done=tests_done,
+                pin_results=pin_items,
+                connection_results=external_items,
+                raw_status=f"Código de salida: {proc.returncode}",
+            )
+            put(q, "\n" + report_txt, "done" if proc.returncode == 0 else "error")
+        except Exception as e:
+            put(q, f"\nNo pude crear informe final: {e}\n", "warn")
         jobs[job_id]["status"] = "done" if proc.returncode == 0 else "error"
         put(q, f"\nRevisión terminada. Código: {proc.returncode}\n", "done" if proc.returncode == 0 else "error")
         put(q, "__DONE__", "done")
@@ -526,10 +844,41 @@ def run_pin_job(job_id, bsdl_path, netlist_path, pin, options=None):
         put(q, "SCAN CHAIN:\n" + cmd(sock, "scan_chain") + "\n", "log")
         cmd(sock, f"irscan {tap} {idcode}")
         put(q, "IDCODE:\n" + cmd(sock, f"drscan {tap} 32 0") + "\n", "log")
+        put(q, "[1/4] Cambio 0/1 y lectura JTAG...\n", "log")
         result = review_pin(sock, tap, extest, sample_opcode, bits, info["pins"], pin, board_map=board_map)
+        raw = result.get("raw") or {}
+        put(q, f"    Al pedir 1 leyó: {raw.get('selected_high_read')}\n", "log")
+        put(q, f"    Al pedir 0 leyó: {raw.get('selected_low_read')}\n", "log")
+        put(q, "[2/4] Stuck-at-0... " + ("FAIL\n" if result.get("stuck_at_0") else "PASS\n"), "error" if result.get("stuck_at_0") else "log")
+        put(q, "[3/4] Stuck-at-1... " + ("FAIL\n" if result.get("stuck_at_1") else "PASS\n"), "error" if result.get("stuck_at_1") else "log")
+        put(q, "[4/4] Cortos con otros pines... " + ("FAIL\n" if result.get("unexpected_followers") else "PASS\n"), "error" if result.get("unexpected_followers") else "log")
         extest_write(sock, tap, extest, bits, 0)
         with open(os.path.join(out_dir, "single_pin_report.json"), "w", encoding="utf-8") as f:
             json.dump(result, f, indent=2, ensure_ascii=False)
+        pin_item = {
+            "pin": pin,
+            "status": result.get("status") or ("OK" if result.get("passed") else "FAIL"),
+            "role": "Pin normal",
+            "check": "Revisión individual de pin",
+            "net": ", ".join(result.get("driver_nets") or []) or None,
+            "unexpected_followers": result.get("unexpected_followers") or [],
+            "stuck_at_0": result.get("stuck_at_0"),
+            "stuck_at_1": result.get("stuck_at_1"),
+            "raw": raw,
+            "checks": ["Cambio 0/1", "Stuck-at-0", "Stuck-at-1", "Cortos"],
+        }
+        report_txt, _ = write_final_report(
+            out_dir,
+            title="Revisión individual de pin",
+            chipname=chipname,
+            bsdl_name=os.path.basename(bsdl_path),
+            netlist_name=os.path.basename(netlist_path) if netlist_path else None,
+            pins_found=len(info.get("pins", {})),
+            selected_pins=[pin],
+            tests_done=["Cambio 0/1", "Stuck-at-0: detectar pegado a 0", "Stuck-at-1: detectar pegado a 1", "Revisión de cortos"],
+            pin_results=[pin_item],
+        )
+        put(q, "\n" + report_txt, "done" if result.get("passed") else "error")
         status = result.get("status")
         put(q, f"Pin {pin}: {status}\n", "done" if result.get("passed") else "error")
         if result.get("unexpected_followers"):
@@ -569,6 +918,7 @@ def run_external_pin_job(job_id, bsdl_path, netlist_path, pin, options=None):
         _, nets = parse_netlist(netlist_path)
         refs = [options.get("uut_ref") or "U1"] + DEFAULT_UUT_REFS
         uut_ref = normalize_ref(options.get("uut_ref")) if options.get("uut_ref") else find_uut_ref_in_netlist(nets, refs)
+        board_map, _ = build_board_map(nets, info["pins"], uut_ref)
 
         # Reutilizamos el generador de pruebas externas, pero filtrado al pin elegido.
         from jtag_tester_core import build_external_line_tests, run_external_line_tests
@@ -589,10 +939,28 @@ def run_external_pin_job(job_id, bsdl_path, netlist_path, pin, options=None):
         cmd(sock, f"irscan {tap} {info['idcode']}")
         put(q, "IDCODE:\n" + cmd(sock, f"drscan {tap} 32 0") + "\n", "log")
 
+        put(q, f"Revisión básica del pin {pin}: cambio 0/1, pegado a 0/1 y cortos.\n", "info")
+        base_result = review_pin(sock, tap, info["extest"], info["sample"], info["bits"], info["pins"], pin, board_map=board_map)
+        base_item = short_results_to_items([{"driver": pin, **base_result}], "Pin normal antes de conexión externa")[0]
+
         report = run_external_line_tests(sock, tap, info["extest"], info["sample"], info["bits"], info["pins"], tests)
         extest_write(sock, tap, info["extest"], info["bits"], 0)
         with open(os.path.join(out_dir, "special_pin_connection_report.json"), "w", encoding="utf-8") as f:
-            json.dump(report, f, indent=2, ensure_ascii=False)
+            json.dump({"pin_base": base_result, "connections": report}, f, indent=2, ensure_ascii=False)
+        connection_items = external_results_to_items(report, "Revisión de conexión especial")
+        report_txt, _ = write_final_report(
+            out_dir,
+            title=f"Revisión de conexión del pin {pin}",
+            chipname=chipname,
+            bsdl_name=os.path.basename(bsdl_path),
+            netlist_name=os.path.basename(netlist_path) if netlist_path else None,
+            pins_found=len(info.get("pins", {})),
+            selected_pins=[pin],
+            tests_done=["Cambio 0/1", "Stuck-at-0", "Stuck-at-1", "Revisión de cortos", "Conectividad con Raspberry Pi", "Revisión de abierto"],
+            pin_results=[base_item],
+            connection_results=connection_items,
+        )
+        put(q, "\n" + report_txt, "done" if all(x.get("status") == "OK" for x in report) else "error")
         ok = sum(1 for r in report if r.get("status") == "OK")
         fail = sum(1 for r in report if r.get("status") == "FAIL")
         err = sum(1 for r in report if r.get("status") == "ERROR")
@@ -683,11 +1051,34 @@ def run_uart_pair_job(job_id, bsdl_path, netlist_path, uart_id, tx_pin=None, rx_
         cmd(sock, f"irscan {tap} {info['idcode']}")
         put(q, "IDCODE:\n" + cmd(sock, f"drscan {tap} 32 0") + "\n", "log")
 
+        put(q, "Revisión básica de los dos pines UART: cambio 0/1, pegado a 0/1 y cortos.\n", "info")
+        uart_base_results = []
+        for upin in sorted(selected_pins):
+            put(q, f"Pin {upin}: Stuck-at-0 / Stuck-at-1 / cortos...\n", "log")
+            br = review_pin(sock, tap, info["extest"], info["sample"], info["bits"], info["pins"], upin, board_map=board_map)
+            uart_base_results.append({"driver": upin, **br})
+        uart_pin_items = short_results_to_items(uart_base_results, "Pin UART: cortos y pegado a 0/1")
+
         report = run_external_line_tests(sock, tap, info["extest"], info["sample"], info["bits"], info["pins"], tests)
         extest_write(sock, tap, info["extest"], info["bits"], 0)
-        full_report = {"uart": chosen, "tests": report}
+        full_report = {"uart": chosen, "pin_base": uart_base_results, "tests": report}
         with open(os.path.join(out_dir, "uart_pair_report.json"), "w", encoding="utf-8") as f:
             json.dump(full_report, f, indent=2, ensure_ascii=False)
+        connection_items = external_results_to_items(report, f"Revisión {chosen.get('id')} TX/RX")
+        report_txt, _ = write_final_report(
+            out_dir,
+            title=f"Revisión UART completa {chosen.get('id')}",
+            chipname=chipname,
+            bsdl_name=os.path.basename(bsdl_path),
+            netlist_name=os.path.basename(netlist_path) if netlist_path else None,
+            pins_found=len(info.get("pins", {})),
+            selected_pins=list(selected_pins),
+            tests_done=["UART TX", "UART RX", "Cambio 0/1", "Stuck-at-0", "Stuck-at-1", "Conectividad", "Revisión de abierto", "Revisión de corto"],
+            pin_results=uart_pin_items,
+            connection_results=connection_items,
+            technical_notes=["Es una prueba eléctrica de las líneas TX/RX, no una prueba de datos UART con baud rate."],
+        )
+        put(q, "\n" + report_txt, "done" if all(x.get("status") == "OK" for x in report) else "error")
         ok = sum(1 for r in report if r.get("status") == "OK")
         fail = sum(1 for r in report if r.get("status") == "FAIL")
         err = sum(1 for r in report if r.get("status") == "ERROR")
