@@ -452,7 +452,7 @@ def run_pin_job(job_id, bsdl_path, netlist_path, pin, options=None):
         put(q, f"Pin {pin}: {status}\n", "done" if result.get("passed") else "error")
         if result.get("unexpected_followers"):
             put(q, "Corto sospechoso con: " + ", ".join(result["unexpected_followers"]) + "\n", "error")
-        jobs[job_id]["status"] = "done"
+        jobs[job_id]["status"] = "done" if result.get("passed") else "error"
         put(q, "__DONE__", "done")
     except Exception as e:
         jobs[job_id]["status"] = "error"
@@ -615,6 +615,14 @@ def run_uart_pair_job(job_id, bsdl_path, netlist_path, uart_id, tx_pin=None, rx_
             put(q, "UART eléctrico: PASS. Las dos líneas TX/RX responden como pareja.\n", "done")
         else:
             put(q, "UART eléctrico: FAIL/ERROR. Revisa cruce TX/RX, GND común, GPIO usado o netlist.\n", "error")
+        for r in report:
+            status = r.get("status", "?")
+            net = r.get("net", "?")
+            uut = r.get("uut_pin", "?")
+            gpio = r.get("pi_gpio", "?")
+            put(q, f"Detalle UART: {net} · UUT {uut} <-> PI.GPIO{gpio} · {status}\n", "done" if status == "OK" else "error")
+            if r.get("error"):
+                put(q, f"ERROR UART en {net}: {r.get('error')}\n", "error")
         jobs[job_id]["status"] = "done" if passed else "error"
         put(q, "__DONE__", "done")
     except Exception as e:

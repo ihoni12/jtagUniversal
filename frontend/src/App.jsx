@@ -16,7 +16,7 @@ function cleanConsoleForUser(text) {
   const fail = lines.filter((l) => /\bFAIL\b|CORTO_SOSPECHOSO/.test(l)).length;
   const err = lines.filter((l) => /\bERROR\b/.test(l)).length;
   const important = lines.filter((l) =>
-    /Revisión terminada|Reportes guardados|Pin .*:|CORTO|Lineas con problema|Problemas por NET|OK:|FAIL:|ERROR:|Código:/.test(l)
+    /Revisión terminada|Reportes guardados|Pin .*:|CORTO|Lineas con problema|Problemas por NET|UART eléctrico|Resultado UART|Resultado conexión|Línea:|Conexión:|SCAN CHAIN|IDCODE|OK:|FAIL:|ERROR:|Código:/.test(l)
   ).slice(-30);
   const state = err ? "Terminó con errores" : fail ? "Terminó con fallos" : "Terminó correctamente";
   return [
