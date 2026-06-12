@@ -127,46 +127,12 @@ button:disabled { opacity: .55; cursor: not-allowed; }
 .bsdlMini{font-size:10px;color:#9fb0c9;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;min-width:0}.pinTags{display:flex;gap:3px;justify-content:flex-end;align-items:center;grid-column:2;grid-row:1 / span 2}.pinBtn{grid-template-columns:minmax(42px,.75fr) minmax(64px,1fr) auto!important}.pinBtn .bsdlMini{grid-column:2;grid-row:1}.pinBtn b{grid-column:1;grid-row:1}.pinBtn .pinTags{grid-column:3;grid-row:1 / span 2}.pinBtn small{display:none!important}
 @media(max-width:1050px){.simpleInfoGrid{grid-template-columns:1fr 1fr}.resultTable{font-size:12px}.resultTable th:nth-child(3),.resultTable td:nth-child(3){display:none}}
 @media(max-width:650px){.simpleInfoGrid{grid-template-columns:1fr}.resultBanner{display:grid}.resultTable th:nth-child(4),.resultTable td:nth-child(4){display:none}}
-.progressLine.warn{border-color:rgba(245,158,11,.45);background:rgba(245,158,11,.10)}
-.resultBanner.warn{background:rgba(245,158,11,.15);border-color:rgba(245,158,11,.45)}
-.resultTable tr.warn{background:rgba(245,158,11,.09)}
-.pill.warn{background:#d97706;color:white}
 
-/* Ajuste final: panel amigable con scroll y tabla de problemas por tipo */
-.scrollBox {
-  overflow: auto;
-  scrollbar-width: thin;
-  scrollbar-color: #38bdf8 rgba(15,23,42,.65);
-}
-.scrollBox::-webkit-scrollbar { width: 9px; height: 9px; }
-.scrollBox::-webkit-scrollbar-track { background: rgba(15,23,42,.65); border-radius: 999px; }
-.scrollBox::-webkit-scrollbar-thumb { background: linear-gradient(#38bdf8,#2563eb); border-radius: 999px; border: 2px solid rgba(15,23,42,.75); }
-.livePanel { max-height: 520px; overflow: hidden; }
-.livePanel .progressList { max-height: 360px; padding-right: 6px; }
-.reportScroll { max-height: 620px; }
-.progressSummaryCards { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; margin-bottom: 12px; }
-.progressSummaryCards div { border: 1px solid rgba(148,163,184,.16); background: rgba(255,255,255,.045); border-radius: 14px; padding: 11px; }
-.progressSummaryCards small { display: block; color: #94a3b8; font-size: 11px; margin-bottom: 4px; }
-.progressSummaryCards b { font-size: 14px; }
-.mutedNote { color: #94a3b8; font-size: 12px; margin: 10px 2px 0; }
-.tableScroll { max-height: 330px; overflow: auto; scrollbar-width: thin; scrollbar-color: #38bdf8 rgba(15,23,42,.65); }
-.tableScroll::-webkit-scrollbar { width: 9px; height: 9px; }
-.tableScroll::-webkit-scrollbar-track { background: rgba(15,23,42,.65); }
-.tableScroll::-webkit-scrollbar-thumb { background: linear-gradient(#38bdf8,#2563eb); border-radius: 999px; border: 2px solid rgba(15,23,42,.75); }
-.matrixTable th { position: sticky; top: 0; z-index: 2; }
-.matrixTable th, .matrixTable td { text-align: center; }
-.matrixTable th:first-child, .matrixTable td:first-child, .matrixTable th:last-child, .matrixTable td:last-child { text-align: left; }
-.statusDot { display: inline-flex; align-items: center; justify-content: center; width: 26px; height: 26px; border-radius: 999px; font-weight: 900; font-size: 13px; color: white; }
-.statusDot.pass { background: #16a34a; }
-.statusDot.warn { background: #d97706; }
-.statusDot.fail { background: #dc2626; }
-.statusDot.error { background: #7f1d1d; }
-.statusDot.idle { background: #64748b; }
-.detailCell { min-width: 260px; max-width: 520px; line-height: 1.4; }
-.detailCell div + div { margin-top: 5px; }
-.rawLog { max-height: 300px; overflow: auto; }
-@media(max-width:900px){
-  .reportScroll { max-height: 540px; }
-  .tableScroll { max-height: 280px; }
-  .matrixTable { min-width: 840px; }
-}
+/* Consola nueva con scroll real y tabla por tipo de falla */
+.friendlyPanel{max-height:calc(100vh - 285px);overflow:auto;scrollbar-width:thin;scrollbar-color:#38bdf8 rgba(2,6,23,.8)}
+.friendlyPanel::-webkit-scrollbar{width:10px;height:10px}.friendlyPanel::-webkit-scrollbar-track{background:rgba(2,6,23,.8);border-radius:999px}.friendlyPanel::-webkit-scrollbar-thumb{background:linear-gradient(#38bdf8,#22c55e);border-radius:999px;border:2px solid rgba(2,6,23,.9)}
+.tableScroll{width:100%;overflow:auto;max-height:360px;scrollbar-width:thin;scrollbar-color:#38bdf8 rgba(2,6,23,.85)}
+.tableScroll::-webkit-scrollbar{width:10px;height:10px}.tableScroll::-webkit-scrollbar-track{background:rgba(2,6,23,.85)}.tableScroll::-webkit-scrollbar-thumb{background:linear-gradient(#38bdf8,#2563eb);border-radius:999px;border:2px solid rgba(2,6,23,.9)}
+.resultTable th{position:sticky;top:0;z-index:2}.resultTable td:nth-child(3),.resultTable td:nth-child(4),.resultTable td:nth-child(5),.resultTable td:nth-child(6){text-align:center}.resultTable th:nth-child(3),.resultTable th:nth-child(4),.resultTable th:nth-child(5),.resultTable th:nth-child(6){text-align:center;white-space:nowrap}.miniPill{display:inline-flex;min-width:44px;justify-content:center;align-items:center;border-radius:999px;padding:4px 7px;font-size:11px;font-weight:900;background:rgba(148,163,184,.16);color:#cbd5e1}.miniPill.pass{background:rgba(22,163,74,.9);color:white}.miniPill.fail{background:rgba(220,38,38,.95);color:white}.miniPill.idle{background:rgba(100,116,139,.24);color:#94a3b8}
+.rawLog{overflow:auto;max-height:320px;scrollbar-width:thin;scrollbar-color:#22c55e #020617}
+@media(max-width:1050px){.resultTable th:nth-child(3),.resultTable td:nth-child(3),.resultTable th:nth-child(4),.resultTable td:nth-child(4){display:table-cell}.resultTable{min-width:850px}.tableScroll{max-height:330px}}

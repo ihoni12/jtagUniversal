@@ -64,61 +64,9 @@ function cleanConsoleForUser(text) {
 function statusClass(status) {
   const s = String(status || "").toUpperCase();
   if (s.includes("PASS") || s === "OK") return "pass";
-  if (s.includes("AVISO") || s.includes("SKIPPED") || s.includes("NO_COMPROBABLE")) return "warn";
   if (s.includes("FAIL") || s.includes("STUCK") || s.includes("CORTO")) return "fail";
   if (s.includes("ERROR")) return "error";
   return "idle";
-}
-
-function worstStatus(a, b) {
-  const rank = { idle: 0, pass: 1, warn: 2, fail: 3, error: 4 };
-  const ca = statusClass(a);
-  const cb = statusClass(b);
-  return rank[cb] > rank[ca] ? b : a;
-}
-
-function shortDetail(text) {
-  if (!text) return "Sin errores detectados.";
-  return text
-    .replace("El pin quedó pegado a 0: ", "")
-    .replace("El pin quedó pegado a 1: ", "")
-    .replace("Posible ", "Posible ")
-    .trim();
-}
-
-function categoryFromText(revision, reason, extra) {
-  const t = `${revision || ""} ${reason || ""} ${extra || ""}`.toLowerCase();
-  if (t.includes("pegado a 0") || t.includes("stuck-at-0")) return "stuck0";
-  if (t.includes("pegado a 1") || t.includes("stuck-at-1")) return "stuck1";
-  if (t.includes("corto")) return "short";
-  if (t.includes("abierto")) return "open";
-  if (t.includes("conect") || t.includes("uart") || t.includes("gpio") || t.includes("net_")) return "connection";
-  if (t.includes("cambio") || t.includes("0/1")) return "change";
-  return "review";
-}
-
-function createEmptyPinRow(pin, extra = "") {
-  return {
-    pin,
-    extra,
-    status: "PASS",
-    change: "PASS",
-    stuck0: "PASS",
-    stuck1: "PASS",
-    short: "PASS",
-    open: "PASS",
-    connection: "PASS",
-    details: [],
-  };
-}
-
-function addProblemToRow(row, category, status, revision, reason) {
-  const normalized = String(status || "PASS").toUpperCase();
-  row.status = worstStatus(row.status, normalized);
-  if (category in row) row[category] = worstStatus(row[category], normalized);
-  if (normalized !== "PASS" || reason) {
-    row.details.push({ status: normalized, revision: revision || "Revisión", reason: shortDetail(reason) });
-  }
 }
 
 function parseFinalReport(text) {
@@ -133,7 +81,6 @@ function parseFinalReport(text) {
   const pinsAvailable = getValue("Pines disponibles en el BSDL");
   const pinsUsed = getValue("Pines usados en esta prueba");
   const pass = getValue("PASS") || "0";
-  const aviso = getValue("AVISO") || "0";
   const fail = getValue("FAIL") || "0";
   const error = getValue("ERROR") || "0";
 
@@ -146,59 +93,41 @@ function parseFinalReport(text) {
     }
   }
 
-  const pinMap = new Map();
-  const connectionMap = new Map();
-  const rawRows = [];
-
-  for (let i = 0; i < lines.length; i++) {
-    const m = lines[i].match(/^-\s*([^:]+):\s*(PASS|AVISO|FAIL|ERROR)\s*(?:\((.*)\))?$/i);
+  const rows = [];
+  const detailIndex = lines.findIndex((l) => l === "Detalle por pin/conexión:");
+  const startAt = detailIndex >= 0 ? detailIndex + 1 : 0;
+  for (let i = startAt; i < lines.length; i++) {
+    const m = lines[i].match(/^-\s*([^:]+):\s*(PASS|FAIL|ERROR)\s*(?:\((.*)\))?$/i);
     if (!m) continue;
-    const pin = m[1].trim();
-    const statusLine = m[2].toUpperCase();
-    const extra = m[3] || "";
-    let revision = "";
-    let reason = "";
+    const row = { pin: m[1].trim(), status: m[2].toUpperCase(), extra: m[3] || "", revision: "", reason: "", checksText: "" };
+    const extraLines = [];
     for (let j = i + 1; j < Math.min(lines.length, i + 12); j++) {
       if (lines[j].startsWith("- ")) break;
-      if (lines[j].startsWith("Revisión:")) revision = lines[j].replace("Revisión:", "").trim();
-      if (lines[j].startsWith("Motivo:")) reason = lines[j].replace("Motivo:", "").trim();
+      extraLines.push(lines[j]);
+      if (lines[j].startsWith("Revisión:")) row.revision = lines[j].replace("Revisión:", "").trim();
+      if (lines[j].startsWith("Motivo:")) row.reason = lines[j].replace("Motivo:", "").trim();
     }
-    rawRows.push({ pin, status: statusLine, extra, revision, reason });
+    row.checksText = `${row.revision} ${row.reason} ${extraLines.join(" ")}`;
+    rows.push(row);
   }
 
-  for (const r of rawRows) {
-    const isConnection = /GPIO|UART|SPI|I2C|NET_/i.test(r.extra) && (/GPIO|NET_/i.test(r.extra) || /UART|SPI|I2C/i.test(r.revision));
-    const key = isConnection ? `${r.pin}-${r.extra}` : r.pin;
-    const map = isConnection ? connectionMap : pinMap;
-    if (!map.has(key)) map.set(key, createEmptyPinRow(r.pin, r.extra));
-    const row = map.get(key);
-    const category = categoryFromText(r.revision, r.reason, r.extra);
-    addProblemToRow(row, category, r.status, r.revision, r.reason);
-  }
-
-  const pins = Array.from(pinMap.values()).sort((a, b) => statusClass(b.status).localeCompare(statusClass(a.status)) || a.pin.localeCompare(b.pin));
-  const connections = Array.from(connectionMap.values()).sort((a, b) => statusClass(b.status).localeCompare(statusClass(a.status)) || a.pin.localeCompare(b.pin));
-  return { status, reviewType, chip, pinsAvailable, pinsUsed, pass, aviso, fail, error, tests, pins, connections };
+  const connections = rows.filter((r) => /GPIO|UART|SPI|I2C|NET_/i.test(r.extra) && /GPIO|NET_/i.test(r.extra));
+  const pins = rows.filter((r) => !connections.includes(r));
+  return { status, reviewType, chip, pinsAvailable, pinsUsed, pass, fail, error, tests, pins, connections };
 }
 
 function ProgressView({ output, running }) {
   const lines = output.split("\n").map((x) => x.trim()).filter(Boolean);
   const visible = lines.filter((l) =>
-    /Empezó|Inici|Revisión|Revisando|\[\d+\/\d+\]|Stuck|Corto|Abierto|Conectividad|Resultado|PASS|FAIL|ERROR|AVISO|Pin |UART|Conexión|Línea:/i.test(l)
-  ).filter((l) => !/^SCAN CHAIN:?$/i.test(l) && !/^IDCODE:?$/i.test(l));
+    /Empezó|Inici|Revisión|Revisando|\[\d+\/\d+\]|Stuck|Corto|Abierto|Conectividad|Resultado|PASS|FAIL|ERROR|Pin |UART|Conexión|Línea:/i.test(l)
+  ).filter((l) => !/^SCAN CHAIN:?$/i.test(l) && !/^IDCODE:?$/i.test(l)).slice(-45);
 
   if (!output) return <div className="emptyResult">Esperando revisión...</div>;
-  const last = visible.slice(-18);
   return <div className="friendlyPanel livePanel">
-    <div className="friendlyHeader"><b>{running ? "Progreso de la revisión" : "Progreso guardado"}</b><span>{visible.length} eventos</span></div>
-    <div className="progressSummaryCards">
-      <div><small>Estado</small><b>{running ? "Revisando..." : "Terminado"}</b></div>
-      <div><small>Últimos pasos</small><b>{last.length}</b></div>
+    <div className="friendlyHeader"><b>{running ? "Progreso de la revisión" : "Progreso guardado"}</b><span>{visible.length} eventos visibles</span></div>
+    <div className="progressList">
+      {visible.map((line, i) => <div key={i} className={`progressLine ${statusClass(line)}`}><span>{line}</span></div>)}
     </div>
-    <div className="progressList scrollBox">
-      {last.map((line, i) => <div key={i} className={`progressLine ${statusClass(line)}`}><span>{line}</span></div>)}
-    </div>
-    {visible.length > last.length && <p className="mutedNote">Mostrando los últimos {last.length} eventos. Usa “Ver log completo” para copiar todo.</p>}
   </div>;
 }
 
@@ -207,7 +136,7 @@ function FinalResultView({ output }) {
   const hasFinal = /RESULTADO FINAL|INFORME AVANZADO/i.test(output);
   if (!hasFinal) return <ProgressView output={output} running={false} />;
 
-  return <div className="friendlyPanel finalReport scrollBox reportScroll">
+  return <div className="friendlyPanel finalReport">
     <div className={`resultBanner ${statusClass(report.status)}`}>
       <div><small>Resultado final</small><b>{report.status}</b></div>
       <span>{report.reviewType}</span>
@@ -215,50 +144,47 @@ function FinalResultView({ output }) {
 
     <div className="simpleInfoGrid">
       <div><small>Placa / chip</small><b>{report.chip}</b></div>
-      <div><small>Pines encontrados en BSDL</small><b>{report.pinsAvailable || "-"}</b></div>
-      <div><small>Pines tocados por esta prueba</small><b>{report.pinsUsed || "-"}</b></div>
-      <div><small>Resultados</small><b>PASS {report.pass} · AVISO {report.aviso || 0} · FAIL {report.fail} · ERROR {report.error}</b></div>
+      <div><small>Pines del BSDL</small><b>{report.pinsAvailable || "-"}</b></div>
+      <div><small>Pines usados en esta prueba</small><b>{report.pinsUsed || "-"}</b></div>
+      <div><small>Resultados</small><b>PASS {report.pass} · FAIL {report.fail} · ERROR {report.error}</b></div>
     </div>
 
     {report.tests.length > 0 && <div className="testChips">
       {report.tests.map((t) => <span key={t}>✓ {t}</span>)}
     </div>}
 
-    <PinProblemMatrix title="Tabla de pines" rows={report.pins} empty="No hay pines normales en este informe." />
-    <PinProblemMatrix title="Tabla de conexiones" rows={report.connections} empty="No hay conexiones TX/RX/SPI/I2C/GPIO en este informe." connection />
+    <ResultTable title="Pines revisados" rows={report.pins} empty="No hay pines normales en este informe." />
+    <ResultTable title="Conexiones revisadas" rows={report.connections} empty="No hay conexiones TX/RX/SPI/I2C/GPIO en este informe." connection />
   </div>;
 }
 
-function StatusDot({ value }) {
-  const c = statusClass(value || "PASS");
-  const label = value || "PASS";
-  return <span className={`statusDot ${c}`} title={label}>{label === "PASS" ? "✓" : label === "AVISO" ? "!" : "✕"}</span>;
+function markFor(row, kind) {
+  const text = `${row.status} ${row.extra} ${row.revision} ${row.reason} ${row.checksText}`.toLowerCase();
+  const fail = row.status !== "PASS";
+  if (kind === "short") return /corto|short|seguidor|sigue|followers/.test(text) ? (fail ? "FAIL" : "OK") : "-";
+  if (kind === "open") return /abierto|open|no llegó|missing|conexión externa|conectividad/.test(text) ? (fail ? "FAIL" : "OK") : "-";
+  if (kind === "stuck0") return /pegado a 0|stuck_at_0|stuck-at-0|nivel 1.*no subió/.test(text) ? (fail ? "FAIL" : "OK") : "-";
+  if (kind === "stuck1") return /pegado a 1|stuck_at_1|stuck-at-1|nivel 0.*no bajó/.test(text) ? (fail ? "FAIL" : "OK") : "-";
+  return "-";
 }
 
-function PinProblemMatrix({ title, rows, empty, connection }) {
-  return <div className="resultTableBox matrixBox">
+function MiniCell({ value }) {
+  const cls = value === "FAIL" ? "fail" : value === "OK" ? "pass" : "idle";
+  return <span className={`miniPill ${cls}`}>{value}</span>;
+}
+
+function ResultTable({ title, rows, empty }) {
+  return <div className="resultTableBox">
     <div className="tableTitle"><b>{title}</b><span>{rows.length}</span></div>
-    {rows.length === 0 ? <p className="emptyTable">{empty}</p> : <div className="tableScroll"><table className="resultTable matrixTable"><thead><tr>
-      <th>{connection ? "Conexión" : "Pin"}</th>
-      <th>Estado</th>
-      <th>Cambio</th>
-      <th>Pegado 0</th>
-      <th>Pegado 1</th>
-      <th>Corto</th>
-      <th>Abierto</th>
-      <th>Conexión</th>
-      <th>Detalle</th>
-    </tr></thead><tbody>
+    {rows.length === 0 ? <p className="emptyTable">{empty}</p> : <div className="tableScroll"><table className="resultTable"><thead><tr><th>Pin</th><th>Estado</th><th>Corto circuito</th><th>Abierto</th><th>Pegado 0</th><th>Pegado 1</th><th>Detalle</th></tr></thead><tbody>
       {rows.map((r, i) => <tr key={`${r.pin}-${i}`} className={statusClass(r.status)}>
         <td><b>{r.pin}</b><small>{r.extra}</small></td>
         <td><span className={`pill ${statusClass(r.status)}`}>{r.status}</span></td>
-        <td><StatusDot value={r.change} /></td>
-        <td><StatusDot value={r.stuck0} /></td>
-        <td><StatusDot value={r.stuck1} /></td>
-        <td><StatusDot value={r.short} /></td>
-        <td><StatusDot value={r.open} /></td>
-        <td><StatusDot value={r.connection} /></td>
-        <td className="detailCell">{r.details.length ? r.details.map((d, k) => <div key={k}><b>{d.revision}:</b> {d.reason}</div>) : "Sin errores detectados."}</td>
+        <td><MiniCell value={markFor(r, "short")} /></td>
+        <td><MiniCell value={markFor(r, "open")} /></td>
+        <td><MiniCell value={markFor(r, "stuck0")} /></td>
+        <td><MiniCell value={markFor(r, "stuck1")} /></td>
+        <td><b>{r.revision || "Revisión"}</b><small>{r.reason || (r.status === "PASS" ? "Sin errores detectados." : "Revisar este pin.")}</small></td>
       </tr>)}
     </tbody></table></div>}
   </div>;
