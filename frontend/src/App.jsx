@@ -46,7 +46,7 @@ function cleanConsoleForUser(text) {
   const lines = text.split("\n").map((x) => x.trim()).filter(Boolean);
   const { ok, fail, err } = calculateResultCounts(text);
   const important = lines.filter((l) =>
-    /Revisión terminada|Reportes guardados|Pin .*:|CORTO|Lineas con problema|Problemas por NET|UART eléctrico|Resultado UART|Resultado conexión|Detalle UART|Detalle conexión|Línea:|Conexión:|OK:|FAIL:|ERROR:|Código:/.test(l)
+    /Revisión terminada|Reportes guardados|Pin .*:|CORTO|Lineas con problema|Problemas por NET|UART eléctrico|Resultado UART|Resultado conexión|Detalle UART|Detalle conexión|Línea:|Conexión:|OK:|FAIL:|ERROR:|Código:|WiFi|Internet|Ethernet|firmware|OpenOCD\/JTAG/.test(l)
   ).filter((l) => !/^SCAN CHAIN:?$/i.test(l) && !/^IDCODE:?$/i.test(l)).slice(-30);
   const state = err ? "Terminó con errores" : fail ? "Terminó con fallos" : "Terminó correctamente";
   return [
@@ -209,6 +209,19 @@ function App() {
   const [pinFilter, setPinFilter] = useState("");
   const [selectedUartOther, setSelectedUartOther] = useState("");
   const [showRawLog, setShowRawLog] = useState(false);
+  const [protocolKind, setProtocolKind] = useState("GENERAL");
+  const [firmwareCode, setFirmwareCode] = useState(`// Código opcional para cargar al chip si la placa lo permite.
+// La prueba eléctrica real usa JTAG + GPIO de Raspberry Pi.
+// Para WiFi/Ethernet completo, carga aquí un firmware que active el módulo/PHY
+// y luego revisa las líneas marcadas en el netlist.
+
+void setup() {
+  // inicializar WiFi / Ethernet / UART según tu chip
+}
+
+void loop() {
+  // enviar señal o mensaje de prueba
+}`);
   const outputRef = useRef(null);
 
   const summary = useMemo(() => calculateResultCounts(output), [output]);
@@ -355,8 +368,9 @@ function App() {
     if (!hasBsdl || !hasNetlist || !pinName) { setError("Para probar TX/RX o conexión especial necesitas BSDL, netlist y un pin."); return; }
     setRunning(true); setDone(false); setOutput(""); setReports([]); setError("");
     try {
-      appendOutput(`Revisión de conexión especial del pin ${pinName} iniciada.\n\n`);
-      const res = await fetch(`${apiUrl}/api/start-special-pin`, { method: "POST", body: makeForm({ pin: pinName }) });
+      appendOutput(`Revisión REAL de conexión especial del pin ${pinName} iniciada.\n`);
+      appendOutput(`Tipo: ${protocolKind}. El backend va a usar OpenOCD/JTAG y GPIO real de la Raspberry Pi según el netlist.\n\n`);
+      const res = await fetch(`${apiUrl}/api/start-special-pin`, { method: "POST", body: makeForm({ pin: pinName, protocol_kind: protocolKind, firmware_code: firmwareCode }) });
       const data = await res.json();
       if (!data.ok) throw new Error(data.error || "No se pudo iniciar la prueba especial del pin.");
       consumeJob(data.job_id);
@@ -445,7 +459,21 @@ function App() {
 
           <section className="card dashboard cleanDashboard">
             <div className="pinInspector">
-              <div><div className="panelTitle noPad">Pin seleccionado</div>{currentPin ? <><h2>{currentPin.name}</h2><p className="muted">IN {currentPin.input_bit} · OUT {currentPin.output_bit} · CTRL {currentPin.control_bit ?? "-"}</p><div className="chips">{(currentPin.functions || []).map((f) => <span key={f}>{f}</span>)}</div><p><b>Nets:</b> {(currentPin.nets || []).length ? currentPin.nets.join(", ") : "sin netlist"}</p>{currentPin.external && <p className="externalHint"><b>Conexión:</b> PI.GPIO{currentPin.external.pi_gpio} · {currentPin.external.direction_hint}</p>}</> : <p className="muted">Selecciona un pin de la barra lateral.</p>}</div>
+              <div><div className="panelTitle noPad">Pin seleccionado</div>{currentPin ? <><h2>{currentPin.name}</h2><p className="muted">IN {currentPin.input_bit} · OUT {currentPin.output_bit} · CTRL {currentPin.control_bit ?? "-"}</p><div className="chips">{(currentPin.functions || []).map((f) => <span key={f}>{f}</span>)}</div><p><b>Nets:</b> {(currentPin.nets || []).length ? currentPin.nets.join(", ") : "sin netlist"}</p>{currentPin.external && <p className="externalHint"><b>Conexión:</b> PI.GPIO{currentPin.external.pi_gpio} · {currentPin.external.direction_hint}</p>}
+                {currentPin?.special && <div className="protocolBox">
+                  <b>Prueba real de WiFi / Internet / pin especial</b>
+                  <small>Usa el netlist para saber qué pin del chip va a qué GPIO de la Pi. El código es editable y queda guardado en el reporte.</small>
+                  <label>Tipo de prueba</label>
+                  <select value={protocolKind} onChange={(e) => setProtocolKind(e.target.value)} disabled={running}>
+                    <option value="GENERAL">Pin especial / GPIO</option>
+                    <option value="WIFI">WiFi / WLAN</option>
+                    <option value="ETHERNET">Internet / Ethernet / PHY</option>
+                    <option value="UART">TX/RX / UART</option>
+                  </select>
+                  <label>Código para cargar al chip, editable</label>
+                  <textarea value={firmwareCode} onChange={(e) => setFirmwareCode(e.target.value)} disabled={running} spellCheck="false" />
+                </div>}
+              </> : <p className="muted">Selecciona un pin de la barra lateral.</p>}</div>
               <div className="pinActions">
                 {currentPin?.special && <span className="specialBig">Especial: {currentPin.special.kind}{currentPin.uart_pair ? ` · ${currentPin.uart_pair.id}` : ""}</span>}
                 <button className="primary" onClick={() => startPinTest()} disabled={running || !currentPin}>Probar pin</button>

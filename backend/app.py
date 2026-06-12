@@ -321,7 +321,7 @@ def guess_pin_functions(pin, nets):
         ("TX", "UART TX"), ("RX", "UART RX"), ("UART", "UART"),
         ("MOSI", "SPI MOSI"), ("MISO", "SPI MISO"), ("SCK", "SPI SCK"), ("SPI", "SPI"),
         ("SDA", "I2C SDA"), ("SCL", "I2C SCL"), ("I2C", "I2C"),
-        ("PWM", "PWM"), ("ADC", "ADC"), ("GPIO", "GPIO"),
+        ("WIFI", "WiFi"), ("WLAN", "WiFi"), ("ANT", "RF/ANT"), ("ETH", "Ethernet"), ("LAN", "Ethernet"), ("PHY", "Ethernet PHY"), ("MDIO", "Ethernet MDIO"), ("MDC", "Ethernet MDC"), ("RMII", "Ethernet RMII"), ("RGMII", "Ethernet RGMII"), ("PWM", "PWM"), ("ADC", "ADC"), ("GPIO", "GPIO"),
     ]
     for key, label in checks:
         if key in hay and label not in funcs:
@@ -342,6 +342,10 @@ def guess_pin_special(pin, nets, funcs):
     for k in ["MOSI", "MISO", "SCK"]:
         if k in hay:
             return {"kind": k, "label": "SPI", "test": "external"}
+    if any(k in hay for k in ["WIFI", "WLAN", "ANT", "RF"]):
+        return {"kind": "WIFI", "label": "WiFi", "test": "external"}
+    if any(k in hay for k in ["ETH", "LAN", "PHY", "MDIO", "MDC", "RMII", "RGMII"]):
+        return {"kind": "ETH", "label": "Internet/Ethernet", "test": "external"}
     return None
 
 def find_pin_external_connection(pin, board_map):
@@ -930,8 +934,10 @@ def run_external_pin_job(job_id, bsdl_path, netlist_path, pin, options=None):
     proc = None
     sock = None
     try:
+        protocol_kind = str(options.get("protocol_kind") or "GENERAL").upper()
+        firmware_code = str(options.get("firmware_code") or "").strip()
         if not netlist_path:
-            raise RuntimeError("Para probar TX/RX o conexión externa necesito netlist con UUT.PIN y PI.GPIOxx")
+            raise RuntimeError("Para hacer una prueba REAL necesito netlist con UUT.PIN y PI.GPIOxx. Sin ese cable externo sólo puedo leer boundary-scan interno.")
         info = parse_bsdl(bsdl_path)
         chipname = info["chipname"]
         tap = f"{chipname}.cpu"
@@ -947,7 +953,12 @@ def run_external_pin_job(job_id, bsdl_path, netlist_path, pin, options=None):
         if not tests:
             raise RuntimeError(f"El pin {pin} no tiene conexión PI.GPIOxx en el netlist. Para TX/RX conecta algo como U1.{pin} + PI.GPIO15")
 
-        put(q, f"Empezó revisión de conexión especial del pin {pin}.\n", "info")
+        put(q, f"Empezó revisión REAL de conexión del pin {pin}.\n", "info")
+        put(q, "Esta prueba sí se comunica: OpenOCD/JTAG maneja o lee el pin del chip, y la Raspberry Pi lee o maneja el GPIO indicado por el netlist.\n", "info")
+        if protocol_kind in ["WIFI", "ETH", "ETHERNET", "INTERNET"]:
+            put(q, f"Tipo pedido: {protocol_kind}. Se revisan eléctricamente los pines del módulo/PHY; el funcionamiento de red completo requiere firmware cargado en el chip.\n", "info")
+        if firmware_code:
+            put(q, "Código/firmware recibido desde la ventana editable y guardado en el reporte. Cárgalo al chip si quieres probar respuesta funcional de WiFi/Ethernet.\n", "info")
         for t in tests:
             put(q, f"Conexión: {t['net']} · UUT {t['uut_pin']} <-> PI.GPIO{t['pi_gpio']} · {t['direction']}\n", "info")
 
@@ -966,7 +977,10 @@ def run_external_pin_job(job_id, bsdl_path, netlist_path, pin, options=None):
         report = run_external_line_tests(sock, tap, info["extest"], info["sample"], info["bits"], info["pins"], tests)
         extest_write(sock, tap, info["extest"], info["bits"], 0)
         with open(os.path.join(out_dir, "special_pin_connection_report.json"), "w", encoding="utf-8") as f:
-            json.dump({"pin_base": base_result, "connections": report}, f, indent=2, ensure_ascii=False)
+            json.dump({"pin_base": base_result, "connections": report, "protocol_kind": protocol_kind, "firmware_code": firmware_code}, f, indent=2, ensure_ascii=False)
+            if firmware_code:
+                with open(os.path.join(out_dir, "firmware_code.txt"), "w", encoding="utf-8") as fw:
+                    fw.write(firmware_code + "\n")
         connection_items = external_results_to_items(report, "Revisión de conexión especial")
         report_txt, _ = write_final_report(
             out_dir,
@@ -976,7 +990,7 @@ def run_external_pin_job(job_id, bsdl_path, netlist_path, pin, options=None):
             netlist_name=os.path.basename(netlist_path) if netlist_path else None,
             pins_found=len(info.get("pins", {})),
             selected_pins=[pin],
-            tests_done=["Cambio 0/1", "Stuck-at-0", "Stuck-at-1", "Revisión de cortos", "Conectividad con Raspberry Pi", "Revisión de abierto"],
+            tests_done=["Cambio 0/1", "Stuck-at-0", "Stuck-at-1", "Revisión de cortos", "Comunicación real OpenOCD/JTAG", "Conectividad real con Raspberry Pi GPIO", "Revisión de abierto"],
             pin_results=[base_item],
             connection_results=connection_items,
         )
@@ -1163,7 +1177,7 @@ def start_special_pin_test():
         bsdl_path, netlist_path = save_uploaded_files(job_id, bsdl_file, netlist_file)
     except Exception as e:
         return jsonify({"ok": False, "error": str(e)}), 400
-    options = {"uut_ref": request.form.get("uut_ref", "U1"), "external_bidir": request.form.get("external_bidir", "false") == "true"}
+    options = {"uut_ref": request.form.get("uut_ref", "U1"), "external_bidir": request.form.get("external_bidir", "false") == "true", "protocol_kind": request.form.get("protocol_kind", "GENERAL"), "firmware_code": request.form.get("firmware_code", "")}
     jobs[job_id] = {"queue": queue.Queue(), "status": "created", "created_at": time.time(), "proc": None, "filename": bsdl_file.filename if bsdl_file and bsdl_file.filename else os.path.basename(bsdl_path), "netlist_filename": netlist_file.filename if netlist_file and netlist_file.filename else (os.path.basename(netlist_path) if netlist_path else None), "options": options, "out_dir": None}
     t = threading.Thread(target=run_external_pin_job, args=(job_id, bsdl_path, netlist_path, pin, options), daemon=True)
     t.start()
